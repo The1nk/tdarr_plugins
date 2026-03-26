@@ -4,8 +4,8 @@ const details = () => ({
     Name: 'Downmix & Dynamic Range Compression',
     Type: 'Audio',
     Operation: 'Transcode',
-    Description: 'Downmixes surround to AAC stereo AND applies dynamic range compression. Will skip files that already have 1/2 channels, or don\'t have surround streams \n\n',
-    Version: '1.10',
+    Description: 'Downmixes surround to AAC stereo AND applies dynamic range compression. For surround tracks, inserts a downmixed stereo track before the original. For existing stereo/mono tracks, applies DRC and volume normalization in place. Skips files with no audio. \n\n',
+    Version: '1.20',
     Tags: 'ffmpeg',
     Inputs: [
         {
@@ -78,11 +78,11 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
             if (stream.channels >= 3) {
                 surroundTrackFound = true;
 
-                response.infoLog += ' Found relevant stream #' + index + ' (audio #' + audiostreamcounter + '), will downmix to #' + outCounter + ', ';
+                response.infoLog += ' Found surround stream #' + index + ' (audio #' + audiostreamcounter + '), will downmix to #' + outCounter + ', ';
 
-                // "copy" the stream (can't copy, have to transcode it anyway)
+                // map twice: downmixed AAC first, then copy of original
                 suffixOfCrazyThings +=
-                    '-map 0:a:' + audiostreamcounter + ' ' + // map audio stream twice
+                    '-map 0:a:' + audiostreamcounter + ' ' +
                     '-map 0:a:' + audiostreamcounter + ' ' +
                     '-c:a:' + outCounter + ' aac ' +  // first one as AAC downmix
                     '-filter:a:' + outCounter + ' "pan=stereo|FL=0.707*FC+0.707*FL+0.707*BL+0.707*SL+0.5*LFE|FR=0.707*FC+0.707*FR+0.707*BR+0.707*SR+0.5*LFE,' + drcFilter + ',dynaudnorm" ';
@@ -93,18 +93,23 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
                     '-c:a:' + outCounter + ' copy ';  // second one is the original
 
                 outCounter += 1;
-            } else
+            } else {
                 stereoFound = true;
+
+                response.infoLog += ' Found stereo/mono stream #' + index + ' (audio #' + audiostreamcounter + '), applying DRC and normalization to #' + outCounter + '.\r\n';
+
+                suffixOfCrazyThings +=
+                    '-map 0:a:' + audiostreamcounter + ' ' +
+                    '-c:a:' + outCounter + ' aac ' +
+                    '-filter:a:' + outCounter + ' "' + drcFilter + ',dynaudnorm" ';
+
+                outCounter += 1;
+            }
         }
     }
 
-    if (stereoFound) {
-        response.infoLog = 'File has mono/stereo audio already, skipping';
-        return response;
-    }
-
-    if (!surroundTrackFound) {
-        response.infoLog = 'File has no surround tracks, skipping';
+    if (!surroundTrackFound && !stereoFound) {
+        response.infoLog = 'File has no audio tracks, skipping';
         return response;
     }
 
