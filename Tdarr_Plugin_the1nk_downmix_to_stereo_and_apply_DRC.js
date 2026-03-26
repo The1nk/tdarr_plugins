@@ -4,8 +4,8 @@ const details = () => ({
     Name: 'Downmix & Dynamic Range Compression',
     Type: 'Audio',
     Operation: 'Transcode',
-    Description: 'Downmixes surround to AAC stereo AND applies dynamic range compression. For surround tracks, inserts a downmixed stereo track before the original. For existing stereo/mono tracks, applies DRC and volume normalization in place. Skips files with no audio. \n\n',
-    Version: '1.20',
+    Description: 'Downmixes surround to AAC stereo AND applies dynamic range compression. For surround tracks, inserts a downmixed stereo track before the original. For existing stereo/mono tracks, applies DRC and volume normalization in place. Skips files with no audio or that have already been processed. \n\n',
+    Version: '1.30',
     Tags: 'ffmpeg',
     Inputs: [
         {
@@ -60,6 +60,12 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         infoLog: '',
         container: `.${file.container}`,
     };
+
+    const tags = (file.ffProbeData.format && file.ffProbeData.format.tags) || {};
+    if (tags.tdarr_drc_processed === '1') {
+        response.infoLog = 'File has already been processed by this plugin, skipping';
+        return response;
+    }
 
     const drcFilter =
         `acompressor=threshold=${inputs.drc_threshold}:ratio=${inputs.drc_ratio}:attack=${inputs.drc_attack}:release=${inputs.drc_release}:makeup=${inputs.drc_makeup}`;
@@ -116,7 +122,8 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     response.preset = '<io> ' +
         '-map 0:v -c:v copy ' +  // copy all vid
         '-map 0:s? -c:s copy ' +  // copy all subs
-        suffixOfCrazyThings
+        suffixOfCrazyThings +
+        '-metadata tdarr_drc_processed=1 '
 
     response.processFile = true;
     response.infoLog = 'File matches requirements. Downmixing, compressing, etc!\r\n' + response.infoLog;
