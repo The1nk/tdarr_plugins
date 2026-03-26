@@ -5,9 +5,45 @@ const details = () => ({
     Type: 'Audio',
     Operation: 'Transcode',
     Description: 'Downmixes surround to AAC stereo AND applies dynamic range compression. Will skip files that already have 1/2 channels, or don\'t have surround streams \n\n',
-    Version: '1.00',
+    Version: '1.10',
     Tags: 'ffmpeg',
-    Inputs: [],
+    Inputs: [
+        {
+            name: 'drc_threshold',
+            type: 'string',
+            defaultValue: '-20dB',
+            inputUI: { type: 'text' },
+            tooltip: 'Compressor threshold. Signals above this level will be compressed. (e.g. -20dB)',
+        },
+        {
+            name: 'drc_ratio',
+            type: 'number',
+            defaultValue: 4,
+            inputUI: { type: 'text' },
+            tooltip: 'Compression ratio (e.g. 4 means 4:1). Higher values = more compression.',
+        },
+        {
+            name: 'drc_attack',
+            type: 'number',
+            defaultValue: 200,
+            inputUI: { type: 'text' },
+            tooltip: 'Attack time in milliseconds. How quickly compression kicks in after threshold is crossed.',
+        },
+        {
+            name: 'drc_release',
+            type: 'number',
+            defaultValue: 1000,
+            inputUI: { type: 'text' },
+            tooltip: 'Release time in milliseconds. How quickly compression lets go after signal drops below threshold.',
+        },
+        {
+            name: 'drc_makeup',
+            type: 'number',
+            defaultValue: 4,
+            inputUI: { type: 'text' },
+            tooltip: 'Makeup gain in dB applied after compression to restore loudness.',
+        },
+    ],
 });
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -24,6 +60,9 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         infoLog: '',
         container: `.${file.container}`,
     };
+
+    const drcFilter =
+        `acompressor=threshold=${inputs.drc_threshold}:ratio=${inputs.drc_ratio}:attack=${inputs.drc_attack}:release=${inputs.drc_release}:makeup=${inputs.drc_makeup}`;
 
     let surroundTrackFound = false;
     let stereoFound = false;
@@ -46,7 +85,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
                     '-map 0:a:' + audiostreamcounter + ' ' + // map audio stream twice
                     '-map 0:a:' + audiostreamcounter + ' ' +
                     '-c:a:' + outCounter + ' aac ' +  // first one as AAC downmix
-                    '-filter:a:' + outCounter + ' "pan=stereo|FL=0.707*FC+0.707*FL+0.707*BL+0.707*SL+0.5*LFE|FR=0.707*FC+0.707*FR+0.707*BR+0.707*SR+0.5*LFE" ';
+                    '-filter:a:' + outCounter + ' "pan=stereo|FL=0.707*FC+0.707*FL+0.707*BL+0.707*SL+0.5*LFE|FR=0.707*FC+0.707*FR+0.707*BR+0.707*SR+0.5*LFE,' + drcFilter + ',dynaudnorm" ';
 
                 outCounter += 1;
                 response.infoLog += 'and copy to #' + outCounter + '!\r\n';
