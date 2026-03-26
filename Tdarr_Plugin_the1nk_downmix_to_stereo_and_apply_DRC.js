@@ -39,19 +39,19 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
             if (stream.channels >= 3) {
                 surroundTrackFound = true;
 
-                response.infoLog += ' Found relevant stream #' + index + ' (audio #' + audiostreamcounter + '), will copy to #' + outCounter + ', ';
+                response.infoLog += ' Found relevant stream #' + index + ' (audio #' + audiostreamcounter + '), will downmix to #' + outCounter + ', ';
 
                 // "copy" the stream (can't copy, have to transcode it anyway)
                 suffixOfCrazyThings +=
                     '-map 0:a:' + audiostreamcounter + ' ' + // map audio stream twice
                     '-map 0:a:' + audiostreamcounter + ' ' +
-                    '-c:a:' + outCounter + ' copy ';  // just mux the first one
+                    '-c:a:' + outCounter + ' aac ' +  // first one as AAC downmix
+                    '-filter:a:' + outCounter + ' "pan=stereo|FL=0.707*FC+0.707*FL+0.707*BL+0.707*SL+0.5*LFE|FR=0.707*FC+0.707*FR+0.707*BR+0.707*SR+0.5*LFE" ';
 
                 outCounter += 1;
-                response.infoLog += 'and downmix to to #' + outCounter + '!\r\n';
+                response.infoLog += 'and copy to #' + outCounter + '!\r\n';
                 suffixOfCrazyThings +=
-                    '-c:a:' + outCounter + ' aac ' +  // Second one in AAC,
-                    '-filter:a:' + outCounter + ' "pan=stereo|FL=0.6*FC+0.707*FL+0.707*BL+0.5*LFE|FR=0.6*FC+0.707*FR+0.707*BR+0.5*LFE" ';
+                    '-c:a:' + outCounter + ' copy ';  // second one is the original
 
                 outCounter += 1;
             } else
