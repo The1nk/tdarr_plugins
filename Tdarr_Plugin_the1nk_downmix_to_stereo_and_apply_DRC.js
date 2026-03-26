@@ -62,7 +62,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     };
 
     const tags = (file.ffProbeData.format && file.ffProbeData.format.tags) || {};
-    if (tags.tdarr_drc_processed === '1') {
+    if (tags.TDARR_DRC_PROCESSED) {
         response.infoLog = 'File has already been processed by this plugin, skipping';
         return response;
     }
@@ -123,7 +123,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         '-map 0:v -c:v copy ' +  // copy all vid
         '-map 0:s? -c:s copy ' +  // copy all subs
         suffixOfCrazyThings +
-        '-metadata tdarr_drc_processed=1 '
+        '-metadata TDARR_DRC_PROCESSED=1 '
 
     response.processFile = true;
     response.infoLog = 'File matches requirements. Downmixing, compressing, etc!\r\n' + response.infoLog;
