@@ -1,3 +1,4 @@
+// tdarrSkipTest
 const details = () => ({
     id: 'Tdarr_Plugin_the1nk_downmix_to_stereo_and_apply_DRC',
     Stage: 'Pre-processing',

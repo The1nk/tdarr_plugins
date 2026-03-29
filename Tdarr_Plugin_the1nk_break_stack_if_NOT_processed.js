@@ -1,3 +1,4 @@
+// tdarrSkipTest
 const details = () => ({
   id: 'Tdarr_Plugin_the1nk_break_stack_if_NOT_processed',
   Stage: 'Pre-processing',

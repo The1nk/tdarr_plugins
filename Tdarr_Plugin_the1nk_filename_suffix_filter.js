@@ -1,3 +1,4 @@
+// tdarrSkipTest
 const details = () => ({
     id: 'Tdarr_Plugin_the1nk_filename_suffix_filter',
     Stage: 'Pre-processing',

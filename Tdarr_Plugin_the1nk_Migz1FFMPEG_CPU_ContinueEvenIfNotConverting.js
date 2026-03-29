@@ -1,4 +1,6 @@
 /* eslint no-plusplus: ["error", { "allowForLoopAfterthoughts": true }] */
+
+// tdarrSkipTest
 const details = () => ({
   id: 'Tdarr_Plugin_the1nk_Migz1FFMPEG_CPU_ContinueEvenIfNotConverting',
   Stage: 'Pre-processing',
