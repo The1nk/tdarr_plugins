@@ -35,6 +35,12 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       FFmpegMode: false
     };
 
+    // Skip cache files
+    if (file._id.includes('-TdarrCacheFile-')) {
+      response.infoLog += 'File is a Tdarr cache file, skipping.\r\n';
+      return response;
+    }
+
     // Break hardlink by copying to a temp file and renaming back.
     // Note: nlink-based hardlink detection is unreliable inside Docker, so we always perform this operation.
     var tempFileName = file._id + '.temp';

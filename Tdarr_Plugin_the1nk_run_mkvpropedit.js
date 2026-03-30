@@ -55,7 +55,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     var newTag = '  <Tag>\n    <Targets/>\n    <Simple>\n      <Name>' + flagname + '</Name>\n      <String>1</String>\n    </Simple>\n  </Tag>\n';
 
     // Extract existing tags to XML
-    var extractResult = spawnSync('mkvextract', ['tags', file._id, xmlFile], {
+    var extractResult = spawnSync('mkvextract', [file._id, 'tags', xmlFile], {
       stdio: 'pipe',
       encoding: 'utf8',
     });
