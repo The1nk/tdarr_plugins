@@ -121,6 +121,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     }
 
     response.preset = '<io> ' +
+        '-map_metadata 0 ' +  // copy global tags
         '-map 0:v -c:v copy ' +  // copy all vid
         '-map 0:s? -c:s copy ' +  // copy all subs
         suffixOfCrazyThings +

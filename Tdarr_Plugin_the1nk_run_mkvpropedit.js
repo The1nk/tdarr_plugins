@@ -8,8 +8,8 @@ const details = () => {
     Name: "Run mkvpropedit",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Runs mkvpropedit on file, if needed, to add track statistics tags. Also sets a new global tag to indicate that it was run so it won't re-run on each cycle.`,
-    Version: "1.00",
+    Description: `Runs mkvpropedit on file, if needed, to add track statistics tags. Also sets a new global tag via ffmpeg to indicate that it was run so it won't re-run on each cycle.`,
+    Version: "1.10",
     Tags: "post-processing",
     Inputs: []
   };
@@ -33,7 +33,8 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       preset: '',
       container: '.' + file.container,
       handBrakeMode: false,
-      FFmpegMode: false
+      FFmpegMode: true,
+      reQueueAfter: true,
     };
 
     var flagname = "TDARR_MKVPROPEDIT";
@@ -44,7 +45,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       return response;
     }
 
-    // Check if already processed
+    // Check if already processed (via ffprobe tags)
     var tags = (file.ffProbeData.format && file.ffProbeData.format.tags) || {};
     var tagKeys = Object.keys(tags);
     if (tagKeys.length > 0) {
@@ -57,69 +58,23 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       return response;
     }
 
-    var xmlFile = file._id + '.xml';
-    var newTag = '  <Tag>\n    <Targets/>\n    <Simple>\n      <Name>' + flagname + '</Name>\n      <String>1</String>\n    </Simple>\n  </Tag>\n';
-
-    // Extract existing tags to XML
-    var extractResult = spawnSync('mkvextract', [file._id, 'tags', xmlFile], {
+    // Step 1: add track statistics tags via mkvpropedit
+    var propeditStatsResult = spawnSync('mkvpropedit', [file._id, '--add-track-statistics-tags'], {
       stdio: 'pipe',
       encoding: 'utf8',
     });
-    if (extractResult.stdout) response.infoLog += 'mkvextract: ' + extractResult.stdout + '\r\n';
-    if (extractResult.stderr) response.infoLog += 'mkvextract: ' + extractResult.stderr + '\r\n';
-    if (extractResult.error) {
-      response.infoLog += 'mkvextract failed to start: ' + extractResult.error + '\r\n';
-      response.processFile = false;
+    if (propeditStatsResult.stdout) response.infoLog += 'mkvpropedit (stats): ' + propeditStatsResult.stdout + '\r\n';
+    if (propeditStatsResult.stderr) response.infoLog += 'mkvpropedit (stats): ' + propeditStatsResult.stderr + '\r\n';
+    if (propeditStatsResult.error) {
+      response.infoLog += 'mkvpropedit (stats) failed to start: ' + propeditStatsResult.error + '\r\n';
       return response;
     }
+    response.infoLog += 'mkvpropedit (stats) completed with exit code ' + propeditStatsResult.status + '.\r\n';
 
-    // Build XML: inject tag into existing content, or create minimal XML from scratch
-    var xmlContent;
-    if (fs.existsSync(xmlFile) && fs.statSync(xmlFile).size > 0) {
-      xmlContent = fs.readFileSync(xmlFile, 'utf8');
-      xmlContent = xmlContent.replace('</Tags>', newTag + '</Tags>');
-      response.infoLog += 'Injected ' + flagname + ' tag into existing tags XML.\r\n';
-    } else {
-      xmlContent = '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE Tags SYSTEM "matroskatags.dtd">\n<Tags>\n' + newTag + '</Tags>';
-      response.infoLog += 'No existing tags found, created new tags XML.\r\n';
-    }
-    fs.writeFileSync(xmlFile, xmlContent, 'utf8');
-
-    // Run mkvpropedit to write tags and add track statistics
-    var propeditResult = spawnSync('mkvpropedit', [file._id, '--tags', 'global:' + xmlFile, '--add-track-statistics-tags'], {
-      stdio: 'pipe',
-      encoding: 'utf8',
-    });
-    if (propeditResult.stdout) response.infoLog += 'mkvpropedit: ' + propeditResult.stdout + '\r\n';
-    if (propeditResult.stderr) response.infoLog += 'mkvpropedit: ' + propeditResult.stderr + '\r\n';
-
-    // Clean up XML file
-    try { fs.unlinkSync(xmlFile); } catch (cleanupErr) {
-      response.infoLog += 'Warning: failed to delete XML file: ' + cleanupErr.message + '\r\n';
-    }
-
-    if (propeditResult.error) {
-      response.infoLog += 'mkvpropedit failed to start: ' + propeditResult.error + '\r\n';
-      response.processFile = false;
-      return response;
-    }
-
-    response.infoLog += 'mkvpropedit completed with exit code ' + propeditResult.status + '.\r\n';
-
-    // Extract and log the resulting tags
-    var verifyXmlFile = file._id + '.verify.xml';
-    var verifyResult = spawnSync('mkvextract', [file._id, 'tags', verifyXmlFile], {
-      stdio: 'pipe',
-      encoding: 'utf8',
-    });
-    if (fs.existsSync(verifyXmlFile)) {
-      var verifyContent = fs.readFileSync(verifyXmlFile, 'utf8');
-      response.infoLog += 'Resulting tags XML:\r\n' + verifyContent + '\r\n';
-      try { fs.unlinkSync(verifyXmlFile); } catch (e) {}
-    } else {
-      response.infoLog += 'Could not extract resulting tags for verification.\r\n';
-    }
-
+    // Step 2: use ffmpeg to stamp the TDARR_MKVPROPEDIT tag (same approach as DRC plugin)
+    response.preset = '<io> -map_metadata 0 -map 0 -c copy -metadata ' + flagname + '=1';
+    response.processFile = true;
+    response.infoLog += 'Queuing ffmpeg to stamp ' + flagname + ' tag.\r\n';
     return response;
   } catch (err) {
     console.log(err);
