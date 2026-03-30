@@ -46,6 +46,12 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
 
     // Check if already processed
     var tags = (file.ffProbeData.format && file.ffProbeData.format.tags) || {};
+    var tagKeys = Object.keys(tags);
+    if (tagKeys.length > 0) {
+      response.infoLog += 'Existing tags: ' + tagKeys.map(function(k) { return k + '=' + tags[k]; }).join(', ') + '\r\n';
+    } else {
+      response.infoLog += 'No existing tags found in file.\r\n';
+    }
     if (tags[flagname]) {
       response.infoLog += 'File has already been processed by this plugin, skipping.\r\n';
       return response;
@@ -99,6 +105,21 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     }
 
     response.infoLog += 'mkvpropedit completed with exit code ' + propeditResult.status + '.\r\n';
+
+    // Extract and log the resulting tags
+    var verifyXmlFile = file._id + '.verify.xml';
+    var verifyResult = spawnSync('mkvextract', [file._id, 'tags', verifyXmlFile], {
+      stdio: 'pipe',
+      encoding: 'utf8',
+    });
+    if (fs.existsSync(verifyXmlFile)) {
+      var verifyContent = fs.readFileSync(verifyXmlFile, 'utf8');
+      response.infoLog += 'Resulting tags XML:\r\n' + verifyContent + '\r\n';
+      try { fs.unlinkSync(verifyXmlFile); } catch (e) {}
+    } else {
+      response.infoLog += 'Could not extract resulting tags for verification.\r\n';
+    }
+
     return response;
   } catch (err) {
     console.log(err);
