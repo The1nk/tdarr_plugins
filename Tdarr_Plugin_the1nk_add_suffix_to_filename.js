@@ -52,7 +52,8 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     response.infoLog += 'file.meta.FileTypeExtension is ' + file.meta.FileTypeExtension + '\r\n';
 
     if (inputs.suffix !== '' && !file.fileNameWithoutExtension.endsWith(inputs.suffix)) {
-      file._id = file.meta.Directory + '/' + file.fileNameWithoutExtension + (' ' + inputs.suffix).replace('  ', ' ') + '.' + file.meta.FileTypeExtension;
+      var cleanName = file.fileNameWithoutExtension.replace(/\s*\(\)\s*$/, '');
+      file._id = file.meta.Directory + '/' + cleanName + (' ' + inputs.suffix).replace('  ', ' ') + '.' + file.meta.FileTypeExtension;
     }
 
     if (fileNameOld != file._id) {
