@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s \"https://api.github.com/search/code?q=RescanMovie+repo:Radarr/Radarr+language:C%23\" -H \"Accept: application/vnd.github.v3+json\")",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(i[''''path'''']\\) for i in d.get\\(''''items'''',[]\\)]\")",
+      "Bash(curl -s \"https://api.github.com/repos/Radarr/Radarr/git/trees/develop?recursive=1\")",
+      "Bash(curl:*)",
+      "Bash(python3:*)"
+    ]
+  }
+}
