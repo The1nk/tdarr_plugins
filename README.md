@@ -62,6 +62,7 @@ Transcodes non-H265 files to H265 using libx265 on the CPU. Bitrate targets are 
 |-------|------|---------|-------------|
 | `container` | string | `mkv` | Output container: `mkv`, `mp4`, or `original` |
 | `bitrate_cutoff` | string | _(empty)_ | Skip transcoding if bitrate is below this value (kbps) |
+| `max_bitrate` | string | _(empty)_ | Re-transcode hevc/vp9 files whose video stream bitrate (ffprobe `BPS` tag) exceeds this value (kbps) |
 | `enable_10bit` | boolean | `false` | Enable 10-bit output |
 | `force_conform` | boolean | `false` | Drop non-conforming streams for the output container |
 

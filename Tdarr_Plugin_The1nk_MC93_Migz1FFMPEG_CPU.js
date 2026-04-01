@@ -49,6 +49,23 @@ const details = () => ({
                     4000`,
   },
   {
+    name: 'max_bitrate',
+    type: 'string',
+    defaultValue: '',
+    inputUI: {
+      type: 'text',
+    },
+    tooltip: `Specify max bitrate for files already in hevc/vp9. If the video stream's bitrate (via ffprobe BPS tag)
+                  exceeds this value, the file will be re-transcoded even though it's already in the target codec.
+                  \\n Rate is in kbps.
+                  \\n Leave empty to disable.
+                    \\nExample:\\n
+                    6000
+
+                    \\nExample:\\n
+                    4000`,
+  },
+  {
     name: 'enable_10bit',
     type: 'boolean',
     defaultValue: false,
@@ -142,6 +159,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   let videoIdx = -1;
   let extraArguments = '';
   let bitrateSettings = '';
+  let reTranscodeToMaxBitrate = false;
   // Work out currentBitrate using "Bitrate = file size / (number of minutes * .0075)"
   // Used from here https://blog.frame.io/2017/03/06/calculate-video-bitrates/
   // eslint-disable-next-line no-bitwise
@@ -243,24 +261,49 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       if (file.ffProbeData.streams[i].codec_name === 'mjpeg' || file.ffProbeData.streams[i].codec_name === 'png') {
         extraArguments += `-map -v:${videoIdx} `;
       }
+
+      // Extract stream BPS for max_bitrate check.
+      const streamBps = parseInt(file.ffProbeData.streams[i].tags?.BPS, 10);
+      const streamBpsKbps = !isNaN(streamBps) ? Math.round(streamBps / 1000) : null;
+      const maxBitrateKbps = inputs.max_bitrate !== '' ? parseInt(inputs.max_bitrate, 10) : null;
+      const exceedsMaxBitrate = streamBpsKbps !== null && maxBitrateKbps !== null
+        && !isNaN(maxBitrateKbps) && streamBpsKbps > maxBitrateKbps;
+
       // Check if codec of stream is hevc or vp9
       // AND check if file.container matches inputs.container.
-      // If so nothing for plugin to do.
       if (
         (file.ffProbeData.streams[i].codec_name === 'hevc' || file.ffProbeData.streams[i].codec_name === 'vp9')
                 && file.container === `${inputs.container}`
       ) {
+        if (exceedsMaxBitrate) {
+          response.infoLog += `File is already hevc/vp9 & in ${inputs.container} but stream bitrate `
+            + `(${streamBpsKbps}kbps) exceeds max_bitrate (${maxBitrateKbps}kbps). Re-transcoding. \n`;
+          reTranscodeToMaxBitrate = true;
+          break;
+        }
         response.processFile = false;
-        response.infoLog += `File is already hevc or vp9 & in ${inputs.container}. \n`;
+        if (maxBitrateKbps !== null) {
+          response.infoLog += `File is already hevc or vp9 & in ${inputs.container}. `
+            + `Stream bitrate (${streamBpsKbps !== null ? `${streamBpsKbps}kbps` : 'unknown'}) `
+            + `is within max_bitrate (${maxBitrateKbps}kbps). \n`;
+        } else {
+          response.infoLog += `File is already hevc or vp9 & in ${inputs.container}. \n`;
+        }
         return response;
       }
       // Check if codec of stream is hevc or vp9
       // AND check if file.container does NOT match inputs.container.
-      // If so remux file.
+      // If so remux file (unless bitrate exceeds max, then re-transcode).
       if (
         (file.ffProbeData.streams[i].codec_name === 'hevc' || file.ffProbeData.streams[i].codec_name === 'vp9')
                 && file.container !== `${inputs.container}`
       ) {
+        if (exceedsMaxBitrate) {
+          response.infoLog += `File is hevc/vp9 but not in ${inputs.container} & stream bitrate `
+            + `(${streamBpsKbps}kbps) exceeds max_bitrate (${maxBitrateKbps}kbps). Re-transcoding. \n`;
+          reTranscodeToMaxBitrate = true;
+          break;
+        }
         response.infoLog += `File is hevc or vp9 but is not in ${inputs.container} container. Remuxing. \n`;
         response.preset = `, -map 0 -c copy -metadata TDARR_PROCESSED=1 ${extraArguments}`;
         response.processFile = true;
@@ -272,20 +315,33 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   }
 
   // Set bitrateSettings variable using bitrate information calulcated earlier.
-  bitrateSettings = `-b:v ${targetBitrate}k -minrate ${minimumBitrate}k `
-  + `-maxrate ${maximumBitrate}k -bufsize ${currentBitrate}k`;
+  // If re-transcoding due to max_bitrate, use max_bitrate as the target instead of the file-size formula.
+  if (reTranscodeToMaxBitrate) {
+    const maxBrTarget = parseInt(inputs.max_bitrate, 10);
+    // eslint-disable-next-line no-bitwise
+    const maxBrMin = ~~(maxBrTarget * 0.7);
+    // eslint-disable-next-line no-bitwise
+    const maxBrMax = ~~(maxBrTarget * 1.3);
+    bitrateSettings = `-b:v ${maxBrTarget}k -minrate ${maxBrMin}k `
+    + `-maxrate ${maxBrMax}k -bufsize ${currentBitrate}k`;
+  } else {
+    bitrateSettings = `-b:v ${targetBitrate}k -minrate ${minimumBitrate}k `
+    + `-maxrate ${maximumBitrate}k -bufsize ${currentBitrate}k`;
+  }
   // Print to infoLog information around file & bitrate settings.
   response.infoLog += `Container for output selected as ${inputs.container}. \n`;
   response.infoLog += `Current bitrate = ${currentBitrate} \n`;
   response.infoLog += 'Bitrate settings: \n';
-  response.infoLog += `Target = ${targetBitrate} \n`;
-  response.infoLog += `Minimum = ${minimumBitrate} \n`;
-  response.infoLog += `Maximum = ${maximumBitrate} \n`;
+  response.infoLog += `Target = ${reTranscodeToMaxBitrate ? inputs.max_bitrate : targetBitrate} \n`;
+  response.infoLog += `Minimum = ${reTranscodeToMaxBitrate ? ~~(parseInt(inputs.max_bitrate, 10) * 0.7) : minimumBitrate} \n`;
+  response.infoLog += `Maximum = ${reTranscodeToMaxBitrate ? ~~(parseInt(inputs.max_bitrate, 10) * 1.3) : maximumBitrate} \n`;
 
   response.preset += `,-map 0 -c:v libx265 ${bitrateSettings} `
   + `-c:a copy -c:s copy -max_muxing_queue_size 9999 -metadata TDARR_PROCESSED=1 ${extraArguments}`;
   response.processFile = true;
-  response.infoLog += 'File is not hevc or vp9. Transcoding. \n';
+  response.infoLog += reTranscodeToMaxBitrate
+    ? 'File is hevc/vp9 but exceeds max bitrate. Re-transcoding. \n'
+    : 'File is not hevc or vp9. Transcoding. \n';
   return response;
 };
 module.exports.details = details;
