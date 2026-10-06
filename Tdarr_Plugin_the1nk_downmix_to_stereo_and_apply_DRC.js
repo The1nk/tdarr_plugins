@@ -6,7 +6,7 @@ const details = () => ({
     Type: 'Audio',
     Operation: 'Transcode',
     Description: 'Downmixes surround to AAC stereo AND applies dynamic range compression. For surround tracks, inserts a downmixed stereo track before the original. For existing stereo/mono tracks, applies DRC and volume normalization in place. Skips files with no audio or that have already been processed. \n\n',
-    Version: '1.30',
+    Version: '1.31',
     Tags: 'ffmpeg',
     Inputs: [
         {
@@ -125,6 +125,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         '-map 0:v -c:v copy ' +  // copy all vid
         '-map 0:s? -c:s copy ' +  // copy all subs
         suffixOfCrazyThings +
+        '-map 0:t? -c:t copy ' +  // copy all attachments (fonts for ASS subs); must be mapped last or the mkv muxer errors
         '-metadata TDARR_DRC_PROCESSED=1 '
 
     response.processFile = true;
