@@ -8,10 +8,26 @@ const details = () => {
     Name: "Run mkvpropedit",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Runs mkvpropedit on file, if needed, to add track statistics tags. Also sets a new global tag via ffmpeg to indicate that it was run so it won't re-run on each cycle.`,
-    Version: "1.10",
+    Description: `Runs mkvpropedit on file, if needed, to add track statistics tags. Also sets a new global tag via ffmpeg to indicate that it was run so it won't re-run on each cycle. With refresh_only, it instead just rewrites the statistics in place on the flow's working file (no tag check, no ffmpeg pass), to fix tags left stale by later ffmpeg steps.`,
+    Version: "1.20",
     Tags: "post-processing",
-    Inputs: []
+    Inputs: [{
+      name: 'refresh_only',
+      type: 'boolean',
+      defaultValue: false,
+      inputUI: {
+        type: 'dropdown',
+        options: [
+          'false',
+          'true',
+        ],
+      },
+      tooltip: `Only refresh the track statistics tags in place, ignoring the TDARR_MKVPROPEDIT tag and skipping the ffmpeg pass.
+            \\nUse this in a flow after the last step that re-encodes or remuxes with ffmpeg (ffmpeg copies the old, now-wrong statistics onto new streams).
+            \\nSkips the file if it is still the original library file, so library files are never edited in place by this mode.
+            \\nExample:\\n
+            true`,
+    }]
   };
 };
 
@@ -42,6 +58,29 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     // Skip non-MKV files
     if (file.container !== 'mkv') {
       response.infoLog += 'File is not MKV, skipping.\r\n';
+      return response;
+    }
+
+    // Refresh-only mode: rewrite the statistics tags in place on the working file and stop.
+    if (inputs.refresh_only === true) {
+      var original = otherArguments && otherArguments.originalLibraryFile && otherArguments.originalLibraryFile._id;
+      if (original && original === file._id) {
+        response.infoLog += 'Working file is still the original library file (nothing in this flow changed it), skipping statistics refresh.\r\n';
+        return response;
+      }
+      var refreshResult = spawnSync('mkvpropedit', [file._id, '--add-track-statistics-tags'], {
+        stdio: 'pipe',
+        encoding: 'utf8',
+      });
+      if (refreshResult.stdout) response.infoLog += 'mkvpropedit (refresh): ' + refreshResult.stdout + '\r\n';
+      if (refreshResult.stderr) response.infoLog += 'mkvpropedit (refresh): ' + refreshResult.stderr + '\r\n';
+      if (refreshResult.error) {
+        response.infoLog += 'mkvpropedit (refresh) failed to start: ' + refreshResult.error + '\r\n';
+        return response;
+      }
+      // mkvpropedit: 0 = ok, 1 = ok with warnings, 2 = error.
+      response.infoLog += 'mkvpropedit (refresh) ' + (refreshResult.status > 1 ? 'FAILED' : 'completed')
+        + ' with exit code ' + refreshResult.status + '.\r\n';
       return response;
     }
 

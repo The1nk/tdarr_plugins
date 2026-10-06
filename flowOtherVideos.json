@@ -1,0 +1,465 @@
+{
+  "_id": "fMHJWLvlujI",
+  "name": "Other Videos",
+  "description": "Other Videos",
+  "tags": "",
+  "flowPlugins": [
+    {
+      "name": "Input File",
+      "sourceRepo": "Community",
+      "pluginName": "inputFile",
+      "version": "1.0.0",
+      "inputsDB": {},
+      "fpEnabled": true,
+      "id": "ikAiZfB_IO",
+      "position": {
+        "x": 368.7110788292972,
+        "y": -463.0838897539186
+      }
+    },
+    {
+      "name": "Run Classic Filter Plugin: Tdarr_Plugin_the1nk_filename_suffix_filter",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicFilterPlugin",
+      "version": "1.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_filename_suffix_filter"
+      },
+      "fpEnabled": true,
+      "id": "7UeKRtT51l",
+      "position": {
+        "x": 168.7110788292972,
+        "y": -363.0838897539186
+      }
+    },
+    {
+      "name": "Run Classic Filter Plugin: Tdarr_Plugin_the1nk_processed_tag_filter",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicFilterPlugin",
+      "version": "1.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_processed_tag_filter"
+      },
+      "fpEnabled": true,
+      "id": "W7A3LUIUJa",
+      "position": {
+        "x": -31.288921170702793,
+        "y": -263.0838897539186
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_break_hardlink",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_break_hardlink"
+      },
+      "fpEnabled": true,
+      "id": "WzzScacDqO",
+      "position": {
+        "x": -231.2889211707028,
+        "y": -163.08388975391858
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_00td_action_remove_stream_by_specified_property",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_00td_action_remove_stream_by_specified_property",
+        "propertyToCheck": "codec_name",
+        "valuesToRemove": "bmp"
+      },
+      "fpEnabled": true,
+      "id": "40-6fZi3xC",
+      "position": {
+        "x": -231.2889211707028,
+        "y": -63.083889753918584
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_MC93_Migz1Remux",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_MC93_Migz1Remux",
+        "force_conform": "true"
+      },
+      "fpEnabled": true,
+      "id": "U7MJuf8GW0",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 36.916110246081416
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_vdka_Remove_DataStreams",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_vdka_Remove_DataStreams"
+      },
+      "fpEnabled": true,
+      "id": "zaTr2fQK3_H",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 136.91611024608142
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_MC93_MigzImageRemoval",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Community:Tdarr_Plugin_MC93_MigzImageRemoval"
+      },
+      "fpEnabled": true,
+      "id": "eavECzKUuP4",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 236.91611024608144
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_run_mkvpropedit",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_run_mkvpropedit"
+      },
+      "fpEnabled": true,
+      "id": "CpUnvaMzO_K",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 336.9161102460814
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_downmix_to_stereo_and_apply_DRC",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_downmix_to_stereo_and_apply_DRC"
+      },
+      "fpEnabled": true,
+      "id": "D0wP8ws7r_J",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 436.9161102460814
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_lmg1_Reorder_Streams",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Community:Tdarr_Plugin_lmg1_Reorder_Streams"
+      },
+      "fpEnabled": true,
+      "id": "Eo2RHPtp8bf",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 536.9161102460814
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_The1nk_MC93_Migz1FFMPEG_CPU",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_The1nk_MC93_Migz1FFMPEG_CPU",
+        "max_bitrate": "4500",
+        "force_conform": "true",
+        "bitrate_cutoff": "3000"
+      },
+      "fpEnabled": true,
+      "id": "ULm5QlnqBze",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 636.9161102460814
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_repair_framerate",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_repair_framerate"
+      },
+      "fpEnabled": true,
+      "id": "waB5SRXXNnd",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 736.9161102460814
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_run_mkvpropedit",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_run_mkvpropedit",
+        "refresh_only": "true"
+      },
+      "fpEnabled": true,
+      "id": "E24UvkgBzZx",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 836.9161102460814
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_add_suffix_to_filename",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_add_suffix_to_filename"
+      },
+      "fpEnabled": true,
+      "id": "Sc6_TplqsIM",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 936.9161102460814
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_run_bash_script_in_post",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_run_bash_script_in_post",
+        "script": "/media/match-subtitles.sh"
+      },
+      "fpEnabled": true,
+      "id": "OSj7GycIDwK",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 1136.9161102460814
+      }
+    },
+    {
+      "name": "Replace Original File",
+      "sourceRepo": "Community",
+      "pluginName": "replaceOriginalFile",
+      "version": "1.0.0",
+      "inputsDB": {},
+      "fpEnabled": true,
+      "id": "Ie-W0q-XN",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 1036.9161102460814
+      }
+    }
+  ],
+  "flowEdges": [
+    {
+      "source": "ikAiZfB_IO",
+      "sourceHandle": "1",
+      "target": "7UeKRtT51l",
+      "targetHandle": null,
+      "id": "8h616c4Pq_"
+    },
+    {
+      "source": "7UeKRtT51l",
+      "sourceHandle": "1",
+      "target": "W7A3LUIUJa",
+      "targetHandle": null,
+      "id": "MOCW498DG1"
+    },
+    {
+      "source": "W7A3LUIUJa",
+      "sourceHandle": "1",
+      "target": "WzzScacDqO",
+      "targetHandle": null,
+      "id": "7pfHD1FZzy"
+    },
+    {
+      "source": "WzzScacDqO",
+      "sourceHandle": "1",
+      "target": "40-6fZi3xC",
+      "targetHandle": null,
+      "id": "XWQd2ows0g"
+    },
+    {
+      "source": "WzzScacDqO",
+      "sourceHandle": "2",
+      "target": "40-6fZi3xC",
+      "targetHandle": null,
+      "id": "3H1H9A-Aru"
+    },
+    {
+      "source": "40-6fZi3xC",
+      "sourceHandle": "1",
+      "target": "U7MJuf8GW0",
+      "targetHandle": null,
+      "id": "JASYq-kS9U"
+    },
+    {
+      "source": "40-6fZi3xC",
+      "sourceHandle": "2",
+      "target": "U7MJuf8GW0",
+      "targetHandle": null,
+      "id": "ANZDDpVwQA"
+    },
+    {
+      "source": "U7MJuf8GW0",
+      "sourceHandle": "1",
+      "target": "zaTr2fQK3_H",
+      "targetHandle": null,
+      "id": "OjgLvsgUzIu"
+    },
+    {
+      "source": "U7MJuf8GW0",
+      "sourceHandle": "2",
+      "target": "zaTr2fQK3_H",
+      "targetHandle": null,
+      "id": "XypuwTfYtLe"
+    },
+    {
+      "source": "zaTr2fQK3_H",
+      "sourceHandle": "1",
+      "target": "eavECzKUuP4",
+      "targetHandle": null,
+      "id": "6f0mcBX3k6X"
+    },
+    {
+      "source": "zaTr2fQK3_H",
+      "sourceHandle": "2",
+      "target": "eavECzKUuP4",
+      "targetHandle": null,
+      "id": "-ZrZHCRVurb"
+    },
+    {
+      "source": "eavECzKUuP4",
+      "sourceHandle": "1",
+      "target": "CpUnvaMzO_K",
+      "targetHandle": null,
+      "id": "OliCnZoaga6"
+    },
+    {
+      "source": "eavECzKUuP4",
+      "sourceHandle": "2",
+      "target": "CpUnvaMzO_K",
+      "targetHandle": null,
+      "id": "zuGUl91fCnp"
+    },
+    {
+      "source": "CpUnvaMzO_K",
+      "sourceHandle": "1",
+      "target": "D0wP8ws7r_J",
+      "targetHandle": null,
+      "id": "VSxwWI2ntoO"
+    },
+    {
+      "source": "CpUnvaMzO_K",
+      "sourceHandle": "2",
+      "target": "D0wP8ws7r_J",
+      "targetHandle": null,
+      "id": "etafnVqnwAj"
+    },
+    {
+      "source": "D0wP8ws7r_J",
+      "sourceHandle": "1",
+      "target": "Eo2RHPtp8bf",
+      "targetHandle": null,
+      "id": "j4c2-wN6Rt8"
+    },
+    {
+      "source": "D0wP8ws7r_J",
+      "sourceHandle": "2",
+      "target": "Eo2RHPtp8bf",
+      "targetHandle": null,
+      "id": "IwETMca1oRD"
+    },
+    {
+      "source": "Eo2RHPtp8bf",
+      "sourceHandle": "1",
+      "target": "ULm5QlnqBze",
+      "targetHandle": null,
+      "id": "dSrIBUhZDAo"
+    },
+    {
+      "source": "Eo2RHPtp8bf",
+      "sourceHandle": "2",
+      "target": "ULm5QlnqBze",
+      "targetHandle": null,
+      "id": "3J1XI9kzTk-"
+    },
+    {
+      "source": "ULm5QlnqBze",
+      "sourceHandle": "1",
+      "target": "waB5SRXXNnd",
+      "targetHandle": null,
+      "id": "5bwn6q_i_YS"
+    },
+    {
+      "source": "ULm5QlnqBze",
+      "sourceHandle": "2",
+      "target": "waB5SRXXNnd",
+      "targetHandle": null,
+      "id": "CyBZZ9JJ6iY"
+    },
+    {
+      "source": "Sc6_TplqsIM",
+      "sourceHandle": "1",
+      "target": "Ie-W0q-XN",
+      "targetHandle": null,
+      "id": "K2RRY_J4T84"
+    },
+    {
+      "source": "Sc6_TplqsIM",
+      "sourceHandle": "2",
+      "target": "Ie-W0q-XN",
+      "targetHandle": null,
+      "id": "dCgIqL2nhHp"
+    },
+    {
+      "source": "Ie-W0q-XN",
+      "sourceHandle": "1",
+      "target": "OSj7GycIDwK",
+      "targetHandle": null,
+      "id": "zylC8t1nf3X"
+    },
+    {
+      "source": "waB5SRXXNnd",
+      "sourceHandle": "1",
+      "target": "E24UvkgBzZx",
+      "targetHandle": null,
+      "id": "bKBlOA-osJY"
+    },
+    {
+      "source": "waB5SRXXNnd",
+      "sourceHandle": "2",
+      "target": "E24UvkgBzZx",
+      "targetHandle": null,
+      "id": "x_ZSVr1GBwv"
+    },
+    {
+      "source": "E24UvkgBzZx",
+      "sourceHandle": "1",
+      "target": "Sc6_TplqsIM",
+      "targetHandle": null,
+      "id": "-0JpS10Rhx6"
+    },
+    {
+      "source": "E24UvkgBzZx",
+      "sourceHandle": "2",
+      "target": "Sc6_TplqsIM",
+      "targetHandle": null,
+      "id": "ynY-1oKmJMU"
+    }
+  ]
+}
