@@ -9,7 +9,7 @@ const details = () => {
     Type: "Video",
     Operation: "Transcode",
     Description: `Breaks hardlink to file, if present. Note: relies on Linux rename(2) semantics to atomically overwrite the original with the temp file — will fail on Windows.`,
-    Version: "1.00",
+    Version: "1.01",
     Tags: "post-processing",
     Inputs: []
   };
@@ -52,10 +52,12 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     fs.renameSync(tempFileName, file._id);
     return response;
 } catch (err) {
-    console.log(err);
-    response.infoLog += 'Error: ' + err.message + '\r\n';
-    response.processFile = false;
-    return response;
+    // Fail the job: continuing would leave the file hardlinked, so a later in-place
+    // edit would also modify the other link (e.g. a seeding torrent).
+    if (tempFileName && fs.existsSync(tempFileName)) {
+      try { fs.unlinkSync(tempFileName); } catch (cleanupErr) { /* ignore */ }
+    }
+    throw new Error('Break hardlink failed, file is still hardlinked: ' + err.message);
   }
 };
 
