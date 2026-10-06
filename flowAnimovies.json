@@ -48,21 +48,6 @@
       }
     },
     {
-      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_break_hardlink",
-      "sourceRepo": "Community",
-      "pluginName": "runClassicTranscodePlugin",
-      "version": "2.0.0",
-      "inputsDB": {
-        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_break_hardlink"
-      },
-      "fpEnabled": true,
-      "id": "Wbff9Uc3sF",
-      "position": {
-        "x": -231.2889211707028,
-        "y": -163.08388975391858
-      }
-    },
-    {
       "name": "Run Classic Transcode Plugin: Tdarr_Plugin_00td_action_remove_stream_by_specified_property",
       "sourceRepo": "Community",
       "pluginName": "runClassicTranscodePlugin",
@@ -76,7 +61,7 @@
       "id": "XOG-CqnW8V",
       "position": {
         "x": -231.2889211707028,
-        "y": -63.083889753918584
+        "y": -163.08388975391858
       }
     },
     {
@@ -92,7 +77,7 @@
       "id": "rZF6ReQcYy",
       "position": {
         "x": -231.2889211707028,
-        "y": 36.916110246081416
+        "y": -63.083889753918584
       }
     },
     {
@@ -107,7 +92,7 @@
       "id": "XBLBKSAFxea",
       "position": {
         "x": -231.2889211707028,
-        "y": 136.91611024608142
+        "y": 36.916110246081416
       }
     },
     {
@@ -122,22 +107,7 @@
       "id": "KNSZVyqebvY",
       "position": {
         "x": -231.2889211707028,
-        "y": 236.91611024608144
-      }
-    },
-    {
-      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_run_mkvpropedit",
-      "sourceRepo": "Community",
-      "pluginName": "runClassicTranscodePlugin",
-      "version": "2.0.0",
-      "inputsDB": {
-        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_run_mkvpropedit"
-      },
-      "fpEnabled": true,
-      "id": "ZqQ5hj0AoEB",
-      "position": {
-        "x": -231.2889211707028,
-        "y": 336.9161102460814
+        "y": 136.91611024608142
       }
     },
     {
@@ -152,7 +122,7 @@
       "id": "zCHdB6yCu0a",
       "position": {
         "x": -231.2889211707028,
-        "y": 436.9161102460814
+        "y": 236.91611024608142
       }
     },
     {
@@ -167,7 +137,23 @@
       "id": "pncOGiFX2kK",
       "position": {
         "x": -231.2889211707028,
-        "y": 536.9161102460814
+        "y": 336.9161102460814
+      }
+    },
+    {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_run_mkvpropedit",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_run_mkvpropedit",
+        "refresh_only": "true"
+      },
+      "fpEnabled": true,
+      "id": "qKpDtZ8aldx",
+      "position": {
+        "x": -231.2889211707028,
+        "y": 436.9161102460814
       }
     },
     {
@@ -185,7 +171,7 @@
       "id": "4bxk3raUO6F",
       "position": {
         "x": -231.2889211707028,
-        "y": 636.9161102460814
+        "y": 536.9161102460814
       }
     },
     {
@@ -200,7 +186,7 @@
       "id": "9-0QfPBeCwb",
       "position": {
         "x": -231.2889211707028,
-        "y": 736.9161102460814
+        "y": 636.9161102460814
       }
     },
     {
@@ -216,7 +202,7 @@
       "id": "A8Rc4LHGSUG",
       "position": {
         "x": -231.2889211707028,
-        "y": 836.9161102460814
+        "y": 736.9161102460814
       }
     },
     {
@@ -231,7 +217,7 @@
       "id": "WcOkUnslPj5",
       "position": {
         "x": -231.2889211707028,
-        "y": 936.9161102460814
+        "y": 836.9161102460814
       }
     },
     {
@@ -247,7 +233,7 @@
       "id": "i6KH3hb9HXE",
       "position": {
         "x": -231.2889211707028,
-        "y": 1136.9161102460814
+        "y": 1036.9161102460814
       }
     },
     {
@@ -264,7 +250,7 @@
       "id": "yKri98UuiL1",
       "position": {
         "x": -231.2889211707028,
-        "y": 1236.9161102460814
+        "y": 1136.9161102460814
       }
     },
     {
@@ -277,7 +263,7 @@
       "id": "hIQmgZ1ri",
       "position": {
         "x": -231.2889211707028,
-        "y": 1036.9161102460814
+        "y": 936.9161102460814
       }
     }
   ],
@@ -299,23 +285,9 @@
     {
       "source": "TvbPczUJMa",
       "sourceHandle": "1",
-      "target": "Wbff9Uc3sF",
+      "target": "XOG-CqnW8V",
       "targetHandle": null,
       "id": "bd4j5eQnYt"
-    },
-    {
-      "source": "Wbff9Uc3sF",
-      "sourceHandle": "1",
-      "target": "XOG-CqnW8V",
-      "targetHandle": null,
-      "id": "DIS-BTAww1"
-    },
-    {
-      "source": "Wbff9Uc3sF",
-      "sourceHandle": "2",
-      "target": "XOG-CqnW8V",
-      "targetHandle": null,
-      "id": "0s-so7Iz7C"
     },
     {
       "source": "XOG-CqnW8V",
@@ -362,30 +334,16 @@
     {
       "source": "KNSZVyqebvY",
       "sourceHandle": "1",
-      "target": "ZqQ5hj0AoEB",
+      "target": "zCHdB6yCu0a",
       "targetHandle": null,
       "id": "hcWPly59ri_"
     },
     {
       "source": "KNSZVyqebvY",
       "sourceHandle": "2",
-      "target": "ZqQ5hj0AoEB",
+      "target": "zCHdB6yCu0a",
       "targetHandle": null,
       "id": "2QjKXnSRHsf"
-    },
-    {
-      "source": "ZqQ5hj0AoEB",
-      "sourceHandle": "1",
-      "target": "zCHdB6yCu0a",
-      "targetHandle": null,
-      "id": "iXQlKZcWi-L"
-    },
-    {
-      "source": "ZqQ5hj0AoEB",
-      "sourceHandle": "2",
-      "target": "zCHdB6yCu0a",
-      "targetHandle": null,
-      "id": "T86ByZeeAXD"
     },
     {
       "source": "zCHdB6yCu0a",
@@ -404,14 +362,14 @@
     {
       "source": "pncOGiFX2kK",
       "sourceHandle": "1",
-      "target": "4bxk3raUO6F",
+      "target": "qKpDtZ8aldx",
       "targetHandle": null,
       "id": "8LILVc1MkPG"
     },
     {
       "source": "pncOGiFX2kK",
       "sourceHandle": "2",
-      "target": "4bxk3raUO6F",
+      "target": "qKpDtZ8aldx",
       "targetHandle": null,
       "id": "x_9cWmxjI2x"
     },
@@ -491,6 +449,20 @@
       "target": "WcOkUnslPj5",
       "targetHandle": null,
       "id": "gX_VmyVht6I"
+    },
+    {
+      "source": "qKpDtZ8aldx",
+      "sourceHandle": "1",
+      "target": "4bxk3raUO6F",
+      "targetHandle": null,
+      "id": "Sltit66Ls3g"
+    },
+    {
+      "source": "qKpDtZ8aldx",
+      "sourceHandle": "2",
+      "target": "4bxk3raUO6F",
+      "targetHandle": null,
+      "id": "nhRJwbX4PfG"
     }
   ]
 }

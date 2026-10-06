@@ -24,15 +24,14 @@ flowchart TD
     f1 -- already suffixed --> stop([End])
     f1 -- continue --> f2{{Processed Tag Filter}}
     f2 -- has TDARR_PROCESSED --> stop
-    f2 -- continue --> t1[Break Hardlink]
-    t1 --> t2[Remove Streams By Property<br/>codec_name = bmp]
+    f2 -- continue --> t2[Remove Streams By Property<br/>codec_name = bmp]
     t2 --> t3[Migz Remux Container<br/>mkv, force_conform]
     t3 --> t4[Remove Data Streams]
     t4 --> t5[Migz Remove Image Formats]
-    t5 --> t6[Run mkvpropedit]
-    t6 --> t7[Downmix to Stereo + DRC]
+    t5 --> t7[Downmix to Stereo + DRC]
     t7 --> t8[Lmg1 Reorder Streams]
-    t8 --> t9[H265 CPU Transcode<br/>cutoff 3000k, max 4500k]
+    t8 --> t8b[Run mkvpropedit<br/>refresh_only]
+    t8b --> t9[H265 CPU Transcode<br/>cutoff 3000k, max 4500k]
     t9 --> t9b[Repair Near-Miss Frame Rate]
     t9b --> t9c[Run mkvpropedit<br/>refresh_only]
     t9c --> t10[Add Suffix to Filename]
@@ -47,10 +46,11 @@ Both outputs of every transcode node ("processed" / "not processed") lead to the
 
 - **Inside a flow, a classic plugin sees the current _working_ file.** After any FFmpeg step, that file is a temp copy in Tdarr's cache directory (`file._id` and `file.meta.Directory` point there), not the file in your library.
 - **Repair Frame Rate goes _after_ H265 CPU Transcode.** It's the last step that touches video, so the repair can't be undone by a later FFmpeg pass.
-- **mkvpropedit runs twice.** The first run, early in the flow, writes track statistics so the H265 step's `max_bitrate` check can read `BPS`. FFmpeg then copies those statistics unchanged onto the streams it re-encodes (DRC, x265), so a re-encoded video can claim its old H.264 bitrate. The second run (`refresh_only`) comes after the last step that changes the file and rewrites the statistics to match the final streams.
+- **mkvpropedit runs twice, both times as `refresh_only`.** FFmpeg copies existing statistics unchanged onto the streams it re-encodes, so a re-encoded video can claim its old H.264 bitrate. The first run comes after DRC and Reorder, just before H265 CPU Transcode, so its `max_bitrate` check reads up-to-date `BPS` values. The second run comes after the last step that changes the file (x265 / Repair Frame Rate), so the final file's statistics match its streams.
+- **Nothing edits the library file in place.** Radarr and Sonarr hardlink imports to the torrent client's copies, so an in-place edit would also change the seeding torrent. Every step before Replace Original File writes to the Tdarr cache; mkvpropedit `refresh_only` refuses to touch the original; and Add Suffix only renames. That's why the flows don't need Break Hardlink, which used to cost a full copy of every file.
+- **One gap from that rule:** if DRC skips an MKV (no audio, or already `TDARR_DRC_PROCESSED`) and no earlier step changed it, the first refresh skips it too. The `max_bitrate` check then only sees statistics the file already had, if any. New imports always have audio and no DRC tag, so they always get fresh statistics.
 - **Add Suffix goes _before_ Replace Original File.** It renames the working file, and Replace Original File then puts it in the library folder under the new name, deleting the old one.
 - **Bash Script and Notify go _after_ Replace Original File.** They need the final file in its real library folder. Before the replace step, the script would run in the cache directory, the Sonarr plugin wouldn't find the `{imdb-…}` show folder, and Radarr would rescan before the new file existed.
-- **Break Hardlink comes before anything that can edit the original in place.** If no earlier step created a working copy, mkvpropedit edits the library file directly.
 
 ## Plugins
 
@@ -149,9 +149,11 @@ With `refresh_only`, the plugin ignores the `TDARR_MKVPROPEDIT` tag, skips the F
 ---
 
 #### `Tdarr_Plugin_the1nk_break_hardlink`
-**Break Hardlink** — v1.00
+**Break Hardlink** — v1.01 _(not used by the flows)_
 
-Breaks filesystem hardlinks by copying the file to a temp path and atomically renaming it back. Run this before any plugin that modifies files in-place to ensure other hardlinked copies are not affected.
+Breaks filesystem hardlinks by copying the file to a temp path and atomically renaming it back. Run this before any plugin that modifies files in-place to ensure other hardlinked copies are not affected. The current flows don't need it (see [Ordering rules](#ordering-rules)).
+
+If the copy or rename fails, the plugin deletes the temp file and **fails the job**. Continuing would leave the file hardlinked, so a later in-place edit would also modify the other link.
 
 > **Note:** Relies on Linux `rename(2)` atomic-overwrite semantics. Will not work correctly on Windows.
 
