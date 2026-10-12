@@ -9,7 +9,7 @@ const details = () => {
     Type: "Video",
     Operation: "Transcode",
     Description: `Losslessly repairs malformed MKV frame-rate metadata (e.g. 23185/967 instead of 24000/1001) that makes files stutter on devices like the Fire TV 4K Max. Remuxes with mkvmerge, setting the default duration to the nearest standard rate and fixing bitstream timing. The result is verified (rate, codec, pixel format, duration, video packet count) before it is used; on any failure the file is left untouched. Flow-only: runs mkvmerge itself and hands the repaired file to the next flow plugin.`,
-    Version: "1.00",
+    Version: "1.01",
     Tags: "pre-processing,mkvmerge,video only",
     Inputs: [{
       name: 'max_delta_fps',
@@ -145,9 +145,9 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       '--fix-bitstream-timing-information', tid + ':1',
       file._id,
     ], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
-    // mkvmerge: 0 = ok, 1 = ok with warnings, 2 = error.
-    if (merge.error || merge.status > 1 || !fs.existsSync(outPath)) {
-      response.infoLog += 'mkvmerge failed (exit ' + merge.status + '): '
+    // mkvmerge: 0 = ok, 1 = ok with warnings, 2 = error. status is null when it was killed by a signal.
+    if (merge.error || merge.status === null || merge.status > 1 || !fs.existsSync(outPath)) {
+      response.infoLog += 'mkvmerge failed (' + (merge.signal ? 'signal ' + merge.signal : 'exit ' + merge.status) + '): '
         + (merge.error ? merge.error.message : merge.stdout) + '\r\n';
       cleanup();
       return response;
