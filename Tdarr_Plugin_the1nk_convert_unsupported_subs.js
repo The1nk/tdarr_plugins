@@ -8,8 +8,8 @@ const details = () => {
     Name: "Convert unsupported subtitles",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT, and muxed back in their original position with their language, name and flags. Cues with no visible text are left out; a WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track. The result is verified (track layout, codecs, cue counts, duration) before it is used; if anything fails the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
-    Version: "1.01",
+    Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT, and muxed back in their original position with their language, name and flags. Cues with no visible text are left out; a WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track. The result is verified before it is used (track layout and codecs, cue counts of converted tracks, an exact packet count for every kept track, duration); if anything fails the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
+    Version: "1.02",
     Tags: "pre-processing,mkvmerge,subtitle",
     Inputs: [],
   };
@@ -128,14 +128,7 @@ var buildMerge = function (input, output, mkvTracks, plan, srtPaths) {
 //    and ffprobe's packet count of the muxed track equals that.
 // So the WebVTT and SRT files are compared by cues with visible text, and the muxed track
 // by the SRT entries mkvmerge keeps.
-var TIMING = /^\s*(\d[\d:.,]*)\s*-->\s*(\d[\d:.,]*)/;
-
-var toSeconds = function (ts) {
-  var parts = ts.replace(',', '.').split(':');
-  var s = 0;
-  for (var i = 0; i < parts.length; i += 1) s = s * 60 + Number(parts[i]);
-  return s;
-};
+var TIMING = /^\s*\d[\d:.,]*\s*-->\s*\d[\d:.,]*/;
 
 // WebVTT and SRT both start a cue with its timing line and end it at the first empty line;
 // anything else outside a cue (header, numbers, ids, NOTE/STYLE blocks) is skipped.
@@ -148,13 +141,12 @@ var parseCues = function (text) {
       else cue.lines.push(line);
       return;
     }
-    var m = TIMING.exec(line);
-    if (m) {
-      cue = { start: toSeconds(m[1]), end: toSeconds(m[2]), lines: [] };
+    if (TIMING.test(line)) {
+      cue = { lines: [] };
       cues.push(cue);
     }
   });
-  return cues.map(function (c) { return { start: c.start, end: c.end, text: c.lines.join('\n') }; });
+  return cues.map(function (c) { return c.lines.join('\n'); });
 };
 
 // Visible text after the markup FFmpeg removes: every WebVTT tag, the SRT tags it writes,
@@ -166,17 +158,13 @@ var hasText = function (text, format) {
   return /\S/.test(t);
 };
 
-// total: cues; content: cues with visible text; muxed / muxedEnd: (SRT) entries mkvmerge
-// stores and the end of the last of them.
+// total: cues; content: cues with visible text; muxed: (SRT) entries mkvmerge stores.
 var cueStats = function (text, format) {
-  var stats = { total: 0, content: 0, muxed: 0, muxedEnd: 0 };
-  parseCues(text).forEach(function (c) {
+  var stats = { total: 0, content: 0, muxed: 0 };
+  parseCues(text).forEach(function (cueText) {
     stats.total += 1;
-    if (hasText(c.text, format)) stats.content += 1;
-    if (/[^ \t\r\n\f\v]/.test(c.text)) {
-      stats.muxed += 1;
-      stats.muxedEnd = Math.max(stats.muxedEnd, c.end);
-    }
+    if (hasText(cueText, format)) stats.content += 1;
+    if (/[^ \t\r\n\f\v]/.test(cueText)) stats.muxed += 1;
   });
   return stats;
 };
@@ -186,83 +174,22 @@ var cueStats = function (text, format) {
 // even for a track with no cues. Returns the problem, or null. text is null when the file is missing.
 var vttProblem = function (text) {
   if (text === null || text === undefined) return 'is missing';
-  if (!/^﻿?WEBVTT(?:[ \t]|\r?\n|$)/.test(text)) return 'is not a WebVTT file (no WEBVTT signature)';
+  if (!/^\uFEFF?WEBVTT(?:[ \t]|\r?\n|$)/.test(text)) return 'is not a WebVTT file (no WEBVTT signature)';
   return null;
 };
 
-// --- where the kept streams end ---
-// Rows of ffprobe "-show_entries packet=stream_index,pts_time,duration_time -of csv=p=0"
-// (ffprobe prints them in that order). CSV keeps a whole-file scan small.
-var parsePacketCsv = function (text) {
-  var packets = [];
-  String(text || '').split(/\r?\n/).forEach(function (line) {
-    var f = line.split(',');
-    if (f.length < 3 || f[0] === '') return;
-    packets.push({ stream_index: Number(f[0]), pts_time: f[1], duration_time: f[2] });
-  });
-  return packets;
+// A packet count from ffprobe -count_packets ('N/A' means none were read), or NaN.
+var packetCount = function (v) {
+  if (v === 'N/A') return 0;
+  return (typeof v === 'number' || /^\d+$/.test(String(v))) ? Number(v) : NaN;
 };
-
-// Streams whose end must be found before a measurement counts: readable video and audio
-// (not cover art). Readable subtitles count when seen, but may legitimately end much earlier.
-var requiredStreams = function (streams) {
-  return (streams || [])
-    .filter(function (s) {
-      return (s.codec_type === 'video' || s.codec_type === 'audio') && !isUnreadable(s)
-        && !(s.disposition && s.disposition.attached_pic);
-    })
-    .map(function (s) { return s.index; });
-};
-
-// Latest packet end (seconds from the file start) over streams not in ignoreIdx, and whether
-// the packets include every required stream (any kept packet when none are required).
-var scanPackets = function (packets, ignoreIdx, requiredIdx, startTime) {
-  var end = 0;
-  var seen = {};
-  var any = false;
-  (packets || []).forEach(function (p) {
-    if (ignoreIdx.indexOf(p.stream_index) !== -1) return;
-    var pts = Number(p.pts_time);
-    if (!isFinite(pts)) return;
-    var dur = Number(p.duration_time);
-    any = true;
-    seen[p.stream_index] = true;
-    end = Math.max(end, pts + (isFinite(dur) ? dur : 0) - (startTime || 0));
-  });
-  var complete = requiredIdx.length > 0
-    ? requiredIdx.every(function (i) { return seen[i]; })
-    : any;
-  return { end: end, complete: complete };
-};
-
-// Where to start reading the input's tail: the last 30s, the last 300s, then the whole file (0).
-var tailStarts = function (inDuration) {
-  var starts = [inDuration - 30, inDuration - 300].filter(function (s) { return s > 0; });
-  starts.push(0);
-  return starts;
-};
-
-// End of the kept streams. A window that reaches EOF and holds a packet of every required
-// stream gives each its exact last packet; a dropped track may have run far past the kept
-// ones (inDuration is its end then), so widen until that holds, or read the whole file.
-// readPackets(start) returns the packets from start (0 = whole file) to EOF.
-var measureKeptEnd = function (inDuration, requiredIdx, ignoreIdx, startTime, readPackets) {
-  var starts = tailStarts(inDuration);
-  var r = { end: 0, complete: false };
-  for (var i = 0; i < starts.length; i += 1) {
-    r = scanPackets(readPackets(starts[i]), ignoreIdx, requiredIdx, startTime);
-    if (r.complete) break;
-  }
-  return r.end;
-};
-
-var packetCount = function (v) { return v === 'N/A' ? 0 : Number(v); };
 
 // The verification gate. Returns why the output can't be used, or null.
-// v: layout (from buildMerge), outTracks (mkvmerge -J), outSubStreams (ffprobe subtitle streams
-// with index, codec_name, nb_read_packets), expectedPackets (track id -> entries mkvmerge keeps),
-// inDuration / outDuration (container), lossy (a track was dropped or a converted cue left out),
-// keptEnd (end of the latest packet that had to be kept).
+// v: layout (from buildMerge; output position i holds layout[i]), outTracks (mkvmerge -J of the
+// output), outStreams (every ffprobe stream of the output: index, codec_type, codec_name,
+// nb_read_packets), inPackets (source stream index -> ffprobe nb_read_packets; source stream N
+// is mkvmerge track N), expectedPackets (converted track id -> SRT entries mkvmerge keeps),
+// inDuration / outDuration (container), lossy (a track was dropped or a converted cue left out).
 var verifyOutput = function (v) {
   if (v.outTracks.length !== v.layout.length) {
     return 'output has ' + v.outTracks.length + ' tracks, expected ' + v.layout.length;
@@ -275,7 +202,8 @@ var verifyOutput = function (v) {
       return 'output track ' + i + ' is ' + o.type + '/' + (o.properties || {}).codec_id + ', expected ' + l.track.type + '/' + want;
     }
   }
-  var subs = v.outSubStreams || [];
+  var streams = v.outStreams || [];
+  var subs = streams.filter(function (s) { return s.codec_type === 'subtitle'; });
   var wantSubs = v.layout.filter(function (x) { return x.track.type === 'subtitles'; }).length;
   if (subs.length !== wantSubs) {
     return 'ffprobe sees ' + subs.length + ' subtitle streams in the output, expected ' + wantSubs;
@@ -289,24 +217,28 @@ var verifyOutput = function (v) {
       return 'output stream ' + s.index + ' has ' + packetCount(s.nb_read_packets) + ' cues, expected ' + v.expectedPackets[sl.track.id];
     }
   }
-  if (!(v.inDuration > 0)) return 'could not measure the input duration';
-  if (!v.lossy) {
-    if (Math.abs(v.outDuration - v.inDuration) > 1.0) {
-      return 'duration mismatch: ' + v.outDuration + 's vs ' + v.inDuration + 's';
-    }
-    return null;
+  // A remux keeps every packet of every track it keeps, so each kept (not converted) track
+  // must have exactly as many packets as its source stream. This catches any truncation,
+  // however short, without relying on durations.
+  for (var k = 0; k < v.layout.length; k += 1) {
+    var kl = v.layout[k];
+    if (kl.converted) continue;
+    var os = streams.find(function (x) { return x.index === k; });
+    var kind = os ? os.codec_type : kl.track.type;
+    var got = packetCount(os && os.nb_read_packets);
+    if (!(got >= 0)) return 'output stream ' + k + ' (' + kind + ') has no packet count';
+    var src = packetCount((v.inPackets || {})[kl.track.id]);
+    if (!(src >= 0)) return 'source stream ' + kl.track.id + ' has no packet count';
+    if (got !== src) return 'output stream ' + k + ' (' + kind + ') has ' + got + ' packets, source has ' + src;
   }
-  // Something was left out, and it may have been what ran longest (e.g. a dropped
-  // subtitle track ending after the video), so the output may be legitimately shorter.
-  // It must still never be longer, and must reach the end of everything it had to keep:
-  // keptEnd is measured from the input's last packets of the kept streams (measureKeptEnd)
-  // and the last stored cue of each converted track, not from (possibly stale) statistics tags.
+  if (!(v.inDuration > 0)) return 'could not measure the input duration';
   if (v.outDuration > v.inDuration + 1.0) {
     return 'output is longer than the input: ' + v.outDuration + 's vs ' + v.inDuration + 's';
   }
-  if (!(v.keptEnd > 0)) return 'could not measure where the kept tracks end';
-  if (v.outDuration < v.keptEnd - 1.0) {
-    return 'output looks truncated: ' + v.outDuration + 's, kept tracks run to ' + v.keptEnd + 's';
+  // When a track was dropped or a cue left out, the output may be legitimately shorter
+  // (what was left out may have run longest); the packet counts above guard the kept tracks.
+  if (!v.lossy && Math.abs(v.outDuration - v.inDuration) > 1.0) {
+    return 'duration mismatch: ' + v.outDuration + 's vs ' + v.inDuration + 's';
   }
   return null;
 };
@@ -395,10 +327,9 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
 
     // The input duration, measured if Tdarr's probe data lacks it (the duration check needs it).
     var inFormat = (file.ffProbeData && file.ffProbeData.format) || {};
-    if (!(Number(inFormat.duration) > 0)) inFormat = probe(['-show_entries', 'format=duration,start_time'], file._id).format || {};
+    if (!(Number(inFormat.duration) > 0)) inFormat = probe(['-show_entries', 'format=duration'], file._id).format || {};
     var inDuration = Number(inFormat.duration) || 0;
     if (!(inDuration > 0)) throw new Error('could not measure the input duration');
-    var startTime = Number(inFormat.start_time) || 0;
 
     var mkvTracks = identify(file._id);
     var plan = planTracks(mkvTracks, unreadable);
@@ -412,7 +343,6 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     var srtPaths = {};
     var expectedPackets = {};
     var lossy = plan.drop.length > 0;
-    var convertedEnd = 0;
     if (plan.convert.length > 0) {
       var extractArgs = [file._id, 'tracks'];
       plan.convert.forEach(function (t) {
@@ -448,7 +378,6 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         srtPaths[t.id] = srt;
         expectedPackets[t.id] = srtStats.muxed;
         if (srtStats.muxed !== vttStats.total) lossy = true;
-        convertedEnd = Math.max(convertedEnd, srtStats.muxedEnd);
         converted.push(t);
         response.infoLog += 'Converted WebVTT track ' + t.id + ' (' + trackLanguage(t) + ') to SRT, ' + srtStats.content + ' cues with text'
           + (vttStats.total !== srtStats.content ? ' (' + (vttStats.total - srtStats.content) + ' empty cues left out)' : '') + '.\r\n';
@@ -463,39 +392,33 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
 
     // --- verification gate ---
     var outTracks = identify(outPath);
-    var outProbe = probe(['-select_streams', 's', '-count_packets',
-      '-show_entries', 'stream=index,codec_name,nb_read_packets:format=duration'], outPath);
-    var keptEnd = 0;
-    var readFrom = -1;
-    if (lossy) {
-      // Where the kept streams end: the input's packets from start to EOF (0 = whole file).
-      var readPackets = function (start) {
-        readFrom = start;
-        var r = spawnSync(ffprobe, ['-v', 'error'].concat(start > 0 ? ['-read_intervals', start.toFixed(3) + '%'] : [],
-          ['-show_entries', 'packet=stream_index,pts_time,duration_time', '-of', 'csv=p=0', '--', file._id]),
-        { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 });
-        if (r.error || r.status !== 0) throw new Error('ffprobe packet scan failed on ' + file._id + ' (' + exitOf(r) + '): ' + why(r));
-        return parsePacketCsv(r.stdout);
-      };
-      var required = requiredStreams(file.ffProbeData && file.ffProbeData.streams);
-      keptEnd = Math.max(measureKeptEnd(inDuration, required, unreadable, startTime, readPackets), convertedEnd);
-      response.infoLog += 'Kept tracks end at ' + keptEnd.toFixed(3) + 's (input ' + inDuration + 's; packets read from '
-        + (readFrom > 0 ? readFrom.toFixed(3) + 's' : 'the start') + ').\r\n';
-    }
+    // Packets per stream, source and output (the -count_packets output is one small JSON row per stream).
+    var inPackets = {};
+    (probe(['-count_packets', '-show_entries', 'stream=index,nb_read_packets'], file._id).streams || [])
+      .forEach(function (s) { inPackets[s.index] = s.nb_read_packets; });
+    var outProbe = probe(['-count_packets',
+      '-show_entries', 'stream=index,codec_type,codec_name,nb_read_packets:format=duration'], outPath);
+    var outStreams = outProbe.streams || [];
     var problem = verifyOutput({
       layout: built.layout,
       outTracks: outTracks,
-      outSubStreams: outProbe.streams || [],
+      outStreams: outStreams,
+      inPackets: inPackets,
       expectedPackets: expectedPackets,
       inDuration: inDuration,
       outDuration: Number((outProbe.format || {}).duration) || 0,
       lossy: lossy,
-      keptEnd: keptEnd,
     });
     if (problem) throw new Error(problem);
 
-    response.infoLog += 'Verified: ' + outTracks.length + ' tracks, every subtitle track readable, cue counts match'
-      + (lossy ? ', output reaches the end of the kept tracks (' + keptEnd.toFixed(3) + 's)' : '') + '.\r\n';
+    var kept = [];
+    built.layout.forEach(function (l, i) {
+      if (l.converted) return;
+      var s = outStreams.find(function (x) { return x.index === i; }) || {};
+      kept.push(i + ' (' + s.codec_type + ') ' + packetCount(s.nb_read_packets));
+    });
+    response.infoLog += 'Verified: ' + outTracks.length + ' tracks, every subtitle track readable, cue counts match; '
+      + 'packets per kept stream match the source: ' + (kept.join(', ') || 'none') + '.\r\n';
     removeFiles(temps);
     // Hand the new file to the next flow plugin (the runner picks up the new _id).
     response.file = Object.assign({}, file, { _id: outPath, file: outPath });
@@ -520,11 +443,6 @@ module.exports._test = {
   toolFailed: toolFailed,
   cueStats: cueStats,
   vttProblem: vttProblem,
-  parsePacketCsv: parsePacketCsv,
-  requiredStreams: requiredStreams,
-  scanPackets: scanPackets,
-  tailStarts: tailStarts,
-  measureKeptEnd: measureKeptEnd,
   verifyOutput: verifyOutput,
   pickFfprobe: pickFfprobe,
 };
