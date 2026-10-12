@@ -181,17 +181,79 @@ var cueStats = function (text, format) {
   return stats;
 };
 
-// End (seconds from the file start) of the latest packet of any stream not in ignoreIdx.
-var lastPacketEnd = function (packets, ignoreIdx, startTime) {
+// An extracted track must be a real WebVTT file: a missing or foreign file means mkvextract
+// lost the track, which must not pass for "no cues with text". mkvextract writes BOM + WEBVTT
+// even for a track with no cues. Returns the problem, or null. text is null when the file is missing.
+var vttProblem = function (text) {
+  if (text === null || text === undefined) return 'is missing';
+  if (!/^﻿?WEBVTT(?:[ \t]|\r?\n|$)/.test(text)) return 'is not a WebVTT file (no WEBVTT signature)';
+  return null;
+};
+
+// --- where the kept streams end ---
+// Rows of ffprobe "-show_entries packet=stream_index,pts_time,duration_time -of csv=p=0"
+// (ffprobe prints them in that order). CSV keeps a whole-file scan small.
+var parsePacketCsv = function (text) {
+  var packets = [];
+  String(text || '').split(/\r?\n/).forEach(function (line) {
+    var f = line.split(',');
+    if (f.length < 3 || f[0] === '') return;
+    packets.push({ stream_index: Number(f[0]), pts_time: f[1], duration_time: f[2] });
+  });
+  return packets;
+};
+
+// Streams whose end must be found before a measurement counts: readable video and audio
+// (not cover art). Readable subtitles count when seen, but may legitimately end much earlier.
+var requiredStreams = function (streams) {
+  return (streams || [])
+    .filter(function (s) {
+      return (s.codec_type === 'video' || s.codec_type === 'audio') && !isUnreadable(s)
+        && !(s.disposition && s.disposition.attached_pic);
+    })
+    .map(function (s) { return s.index; });
+};
+
+// Latest packet end (seconds from the file start) over streams not in ignoreIdx, and whether
+// the packets include every required stream (any kept packet when none are required).
+var scanPackets = function (packets, ignoreIdx, requiredIdx, startTime) {
   var end = 0;
+  var seen = {};
+  var any = false;
   (packets || []).forEach(function (p) {
     if (ignoreIdx.indexOf(p.stream_index) !== -1) return;
     var pts = Number(p.pts_time);
     if (!isFinite(pts)) return;
     var dur = Number(p.duration_time);
+    any = true;
+    seen[p.stream_index] = true;
     end = Math.max(end, pts + (isFinite(dur) ? dur : 0) - (startTime || 0));
   });
-  return end;
+  var complete = requiredIdx.length > 0
+    ? requiredIdx.every(function (i) { return seen[i]; })
+    : any;
+  return { end: end, complete: complete };
+};
+
+// Where to start reading the input's tail: the last 30s, the last 300s, then the whole file (0).
+var tailStarts = function (inDuration) {
+  var starts = [inDuration - 30, inDuration - 300].filter(function (s) { return s > 0; });
+  starts.push(0);
+  return starts;
+};
+
+// End of the kept streams. A window that reaches EOF and holds a packet of every required
+// stream gives each its exact last packet; a dropped track may have run far past the kept
+// ones (inDuration is its end then), so widen until that holds, or read the whole file.
+// readPackets(start) returns the packets from start (0 = whole file) to EOF.
+var measureKeptEnd = function (inDuration, requiredIdx, ignoreIdx, startTime, readPackets) {
+  var starts = tailStarts(inDuration);
+  var r = { end: 0, complete: false };
+  for (var i = 0; i < starts.length; i += 1) {
+    r = scanPackets(readPackets(starts[i]), ignoreIdx, requiredIdx, startTime);
+    if (r.complete) break;
+  }
+  return r.end;
 };
 
 var packetCount = function (v) { return v === 'N/A' ? 0 : Number(v); };
@@ -227,25 +289,24 @@ var verifyOutput = function (v) {
       return 'output stream ' + s.index + ' has ' + packetCount(s.nb_read_packets) + ' cues, expected ' + v.expectedPackets[sl.track.id];
     }
   }
-  if (v.inDuration > 0) {
-    if (!v.lossy) {
-      if (Math.abs(v.outDuration - v.inDuration) > 1.0) {
-        return 'duration mismatch: ' + v.outDuration + 's vs ' + v.inDuration + 's';
-      }
-    } else {
-      // Something was left out, and it may have been what ran longest (e.g. a dropped
-      // subtitle track ending after the video), so the output may be legitimately shorter.
-      // It must still never be longer, and must reach the end of everything it had to keep:
-      // keptEnd is measured from the input's last packets of the kept streams and the last
-      // stored cue of each converted track, not from (possibly stale) statistics tags.
-      if (v.outDuration > v.inDuration + 1.0) {
-        return 'output is longer than the input: ' + v.outDuration + 's vs ' + v.inDuration + 's';
-      }
-      if (!(v.keptEnd > 0)) return 'could not measure where the kept tracks end';
-      if (v.outDuration < v.keptEnd - 1.0) {
-        return 'output looks truncated: ' + v.outDuration + 's, kept tracks run to ' + v.keptEnd + 's';
-      }
+  if (!(v.inDuration > 0)) return 'could not measure the input duration';
+  if (!v.lossy) {
+    if (Math.abs(v.outDuration - v.inDuration) > 1.0) {
+      return 'duration mismatch: ' + v.outDuration + 's vs ' + v.inDuration + 's';
     }
+    return null;
+  }
+  // Something was left out, and it may have been what ran longest (e.g. a dropped
+  // subtitle track ending after the video), so the output may be legitimately shorter.
+  // It must still never be longer, and must reach the end of everything it had to keep:
+  // keptEnd is measured from the input's last packets of the kept streams (measureKeptEnd)
+  // and the last stored cue of each converted track, not from (possibly stale) statistics tags.
+  if (v.outDuration > v.inDuration + 1.0) {
+    return 'output is longer than the input: ' + v.outDuration + 's vs ' + v.inDuration + 's';
+  }
+  if (!(v.keptEnd > 0)) return 'could not measure where the kept tracks end';
+  if (v.outDuration < v.keptEnd - 1.0) {
+    return 'output looks truncated: ' + v.outDuration + 's, kept tracks run to ' + v.keptEnd + 's';
   }
   return null;
 };
@@ -285,7 +346,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   };
   var exitOf = function (r) { return r.signal ? 'signal ' + r.signal : 'exit ' + r.status; };
   var why = function (r) { return r.error ? r.error.message : (r.stderr || r.stdout || exitOf(r)); };
-  var readText = function (p) { return fs.existsSync(p) ? String(fs.readFileSync(p, 'utf8')) : ''; };
+  var readText = function (p) { return fs.existsSync(p) ? String(fs.readFileSync(p, 'utf8')) : null; };
 
   try {
     if (file.container !== 'mkv') {
@@ -332,6 +393,13 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       return JSON.parse(r.stdout);
     };
 
+    // The input duration, measured if Tdarr's probe data lacks it (the duration check needs it).
+    var inFormat = (file.ffProbeData && file.ffProbeData.format) || {};
+    if (!(Number(inFormat.duration) > 0)) inFormat = probe(['-show_entries', 'format=duration,start_time'], file._id).format || {};
+    var inDuration = Number(inFormat.duration) || 0;
+    if (!(inDuration > 0)) throw new Error('could not measure the input duration');
+    var startTime = Number(inFormat.start_time) || 0;
+
     var mkvTracks = identify(file._id);
     var plan = planTracks(mkvTracks, unreadable);
     if (plan.error) throw new Error(plan.error);
@@ -358,7 +426,10 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       var converted = [];
       plan.convert.forEach(function (t) {
         var vtt = path.join(workDir, 'track' + t.id + '.vtt');
-        var vttStats = cueStats(readText(vtt), 'vtt');
+        var vttText = readText(vtt);
+        var bad = vttProblem(vttText);
+        if (bad) throw new Error('extracted track ' + t.id + ' ' + bad);
+        var vttStats = cueStats(vttText, 'vtt');
         if (vttStats.content === 0) {
           // Nothing to show: drop it like any other unconvertible track.
           plan.drop.push(t);
@@ -394,13 +465,22 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     var outTracks = identify(outPath);
     var outProbe = probe(['-select_streams', 's', '-count_packets',
       '-show_entries', 'stream=index,codec_name,nb_read_packets:format=duration'], outPath);
-    var inDuration = Number(((file.ffProbeData && file.ffProbeData.format) || {}).duration) || 0;
     var keptEnd = 0;
-    if (lossy && inDuration > 0) {
-      // Where the kept streams end: read the input's last 30s of packets (every readable stream).
-      var tail = probe(['-read_intervals', Math.max(0, inDuration - 30).toFixed(3) + '%',
-        '-show_entries', 'packet=stream_index,pts_time,duration_time:format=start_time'], file._id);
-      keptEnd = Math.max(lastPacketEnd(tail.packets, unreadable, Number((tail.format || {}).start_time) || 0), convertedEnd);
+    var readFrom = -1;
+    if (lossy) {
+      // Where the kept streams end: the input's packets from start to EOF (0 = whole file).
+      var readPackets = function (start) {
+        readFrom = start;
+        var r = spawnSync(ffprobe, ['-v', 'error'].concat(start > 0 ? ['-read_intervals', start.toFixed(3) + '%'] : [],
+          ['-show_entries', 'packet=stream_index,pts_time,duration_time', '-of', 'csv=p=0', '--', file._id]),
+        { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 });
+        if (r.error || r.status !== 0) throw new Error('ffprobe packet scan failed on ' + file._id + ' (' + exitOf(r) + '): ' + why(r));
+        return parsePacketCsv(r.stdout);
+      };
+      var required = requiredStreams(file.ffProbeData && file.ffProbeData.streams);
+      keptEnd = Math.max(measureKeptEnd(inDuration, required, unreadable, startTime, readPackets), convertedEnd);
+      response.infoLog += 'Kept tracks end at ' + keptEnd.toFixed(3) + 's (input ' + inDuration + 's; packets read from '
+        + (readFrom > 0 ? readFrom.toFixed(3) + 's' : 'the start') + ').\r\n';
     }
     var problem = verifyOutput({
       layout: built.layout,
@@ -439,7 +519,12 @@ module.exports._test = {
   buildMerge: buildMerge,
   toolFailed: toolFailed,
   cueStats: cueStats,
-  lastPacketEnd: lastPacketEnd,
+  vttProblem: vttProblem,
+  parsePacketCsv: parsePacketCsv,
+  requiredStreams: requiredStreams,
+  scanPackets: scanPackets,
+  tailStarts: tailStarts,
+  measureKeptEnd: measureKeptEnd,
   verifyOutput: verifyOutput,
   pickFfprobe: pickFfprobe,
 };

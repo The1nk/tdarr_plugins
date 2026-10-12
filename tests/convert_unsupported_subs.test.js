@@ -17,7 +17,8 @@ Module._load = function (request, parent, isMain) {
 
 const pluginModule = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'));
 const {
-  findUnreadableSubs, planTracks, buildMerge, toolFailed, cueStats, lastPacketEnd, verifyOutput, pickFfprobe,
+  findUnreadableSubs, planTracks, buildMerge, toolFailed, cueStats, verifyOutput, pickFfprobe,
+  vttProblem, parsePacketCsv, requiredStreams, scanPackets, tailStarts, measureKeptEnd,
 } = pluginModule._test;
 
 // Trimmed from the real "Good Boy (2025)" file.
@@ -251,7 +252,40 @@ test('cueStats: a lost or truncated cue changes the text count', () => {
   assert.notStrictEqual(cueStats(truncated, 'srt').content, cueStats(vtt4, 'vtt').content);
 });
 
-test('lastPacketEnd: latest pts+duration over streams not ignored, relative to start time', () => {
+test('vttProblem: extracted file must exist and start with the WEBVTT signature', () => {
+  assert.match(vttProblem(null), /missing/);
+  assert.match(vttProblem('1\n00:00:01,000 --> 00:00:02,000\nHello\n'), /not a WebVTT file/);
+  assert.match(vttProblem(''), /not a WebVTT file/);
+  assert.match(vttProblem('WEBVTTX\n'), /not a WebVTT file/);
+  // mkvextract writes BOM + WEBVTT for a track with no cues; that one is valid (and has no text cues).
+  assert.strictEqual(vttProblem('﻿WEBVTT\n'), null);
+  assert.strictEqual(cueStats('﻿WEBVTT\n', 'vtt').content, 0);
+  assert.strictEqual(vttProblem('WEBVTT'), null);
+  assert.strictEqual(vttProblem('WEBVTT - title\r\n\r\n'), null);
+  assert.strictEqual(vttProblem(vtt4), null);
+});
+
+test('parsePacketCsv: ffprobe csv packet rows (stream_index,pts_time,duration_time)', () => {
+  assert.deepStrictEqual(parsePacketCsv('0,9.920000,0.040000\r\n1,9.98,N/A\n\n'), [
+    { stream_index: 0, pts_time: '9.920000', duration_time: '0.040000' },
+    { stream_index: 1, pts_time: '9.98', duration_time: 'N/A' },
+  ]);
+  assert.deepStrictEqual(parsePacketCsv(''), []);
+});
+
+test('requiredStreams: readable video/audio streams, not cover art or subtitles', () => {
+  const streams = [
+    { index: 0, codec_type: 'video', codec_name: 'h264' },
+    { index: 1, codec_type: 'audio', codec_name: 'aac' },
+    { index: 2, codec_type: 'subtitle' },
+    { index: 3, codec_type: 'subtitle', codec_name: 'subrip' },
+    { index: 4, codec_type: 'audio' },
+    { index: 5, codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 1 } },
+  ];
+  assert.deepStrictEqual(requiredStreams(streams), [0, 1]);
+});
+
+test('scanPackets: latest pts+duration over kept streams, and whether every required stream was seen', () => {
   const packets = [
     { stream_index: 0, pts_time: '99.000000', duration_time: '0.040000' },
     { stream_index: 1, pts_time: '99.500000', duration_time: '0.021333' },
@@ -259,9 +293,70 @@ test('lastPacketEnd: latest pts+duration over streams not ignored, relative to s
     { stream_index: 1, pts_time: 'N/A', duration_time: '0.021333' },
     { stream_index: 0, pts_time: '98.000000' },
   ];
-  assert.strictEqual(lastPacketEnd(packets, [2], 0).toFixed(6), '99.521333');
-  assert.strictEqual(lastPacketEnd(packets, [], 0.5), 119.5);
-  assert.strictEqual(lastPacketEnd(undefined, [], 0), 0);
+  const r = scanPackets(packets, [2], [0, 1], 0);
+  assert.strictEqual(r.end.toFixed(6), '99.521333');
+  assert.strictEqual(r.complete, true);
+  assert.strictEqual(scanPackets(packets, [], [0, 1], 0.5).end, 119.5);
+  assert.strictEqual(scanPackets(packets.filter((p) => p.stream_index !== 0), [2], [0, 1], 0).complete, false);
+  // No required streams: any kept packet will do.
+  assert.strictEqual(scanPackets(packets.slice(2, 3), [2], [], 0).complete, false);
+  assert.strictEqual(scanPackets(packets.slice(1, 3), [2], [], 0).complete, true);
+  assert.deepStrictEqual(scanPackets(undefined, [], [0], 0), { end: 0, complete: false });
+});
+
+test('tailStarts: 30s, then 300s, then the whole file', () => {
+  assert.deepStrictEqual(tailStarts(4524.84), [4494.84, 4224.84, 0]);
+  assert.deepStrictEqual(tailStarts(120), [90, 0]);
+  assert.deepStrictEqual(tailStarts(20), [0]);
+});
+
+// Packets of a file whose video/audio (streams 0, 1) end at 100s while dropped stream 2 runs to `subEnd`.
+const fakeInput = (subEnd) => {
+  const all = [];
+  for (let t = 0; t < 100; t += 0.5) {
+    all.push({ stream_index: 0, pts_time: String(t), duration_time: '0.5' });
+    all.push({ stream_index: 1, pts_time: String(t), duration_time: '0.5' });
+  }
+  all.push({ stream_index: 2, pts_time: String(subEnd - 5), duration_time: '5' });
+  const reads = [];
+  const read = (start) => { reads.push(start); return all.filter((p) => Number(p.pts_time) >= start); };
+  return { read, reads };
+};
+
+test('measureKeptEnd: dropped track ending 90s after the video widens the window and measures 100s', () => {
+  const f = fakeInput(190);
+  assert.strictEqual(measureKeptEnd(190, [0, 1], [2], 0, f.read), 100);
+  assert.deepStrictEqual(f.reads, [160, 0]);
+});
+
+test('measureKeptEnd: gap over 300s falls back to the whole file', () => {
+  const f = fakeInput(2000);
+  assert.strictEqual(measureKeptEnd(2000, [0, 1], [2], 0, f.read), 100);
+  assert.deepStrictEqual(f.reads, [1970, 1700, 0]);
+});
+
+test('measureKeptEnd: small gap is measured from the first 30s tail', () => {
+  const f = fakeInput(110);
+  assert.strictEqual(measureKeptEnd(110, [0, 1], [2], 0, f.read), 100);
+  assert.deepStrictEqual(f.reads, [80]);
+});
+
+test('measureKeptEnd + verifyOutput: >30s gap, nothing converted: correct output passes, truncated fails', () => {
+  const keptEnd = measureKeptEnd(190, [0, 1], [2], 0, fakeInput(190).read);
+  const dropOnly = {
+    layout: layoutGB.slice(0, 2), outTracks: outTracksGB.slice(0, 2), outSubStreams: [], expectedPackets: {},
+    inDuration: 190, lossy: true, keptEnd,
+  };
+  assert.strictEqual(verifyOutput(Object.assign({ outDuration: 100.01 }, dropOnly)), null);
+  assert.match(verifyOutput(Object.assign({ outDuration: 50 }, dropOnly)), /truncated/);
+});
+
+test('measureKeptEnd + verifyOutput: >30s gap with a converted track ending early: truncated video still fails', () => {
+  // The converted track's last stored cue ends at 40s; the video at 100s.
+  const keptEnd = Math.max(measureKeptEnd(190, [0, 1], [2], 0, fakeInput(190).read), 40);
+  const v = okOutput({ inDuration: 190, lossy: true, keptEnd });
+  assert.strictEqual(verifyOutput(Object.assign({}, v, { outDuration: 100.01 })), null);
+  assert.match(verifyOutput(Object.assign({}, v, { outDuration: 45 })), /truncated/);
 });
 
 const layoutGB = [
@@ -320,7 +415,8 @@ test('verifyOutput: converted cue count mismatch (including N/A packets)', () =>
 test('verifyOutput: strict +-1s duration when nothing was lost', () => {
   assert.match(verifyOutput(okOutput({ outDuration: 98.5 })), /duration mismatch/);
   assert.match(verifyOutput(okOutput({ outDuration: 101.5 })), /duration mismatch/);
-  assert.strictEqual(verifyOutput(okOutput({ inDuration: 0, outDuration: 5 })), null);
+  assert.match(verifyOutput(okOutput({ inDuration: 0, outDuration: 5 })), /input duration/);
+  assert.match(verifyOutput(okOutput({ inDuration: NaN, outDuration: 5 })), /input duration/);
 });
 
 test('verifyOutput: a dropped track that ran longest may shorten the output, truncation still fails', () => {
@@ -412,6 +508,56 @@ test('plugin: mkvmerge killed by a signal fails the job, keeps the input and cle
   assert.ok(calls.some((c) => c[0] === 'mkvextract'), 'extracted');
   assert.ok(calls.some((c) => c[0] === 'tdarr-ffmpeg'), 'converted');
   assert.deepStrictEqual(unlinked.slice().sort(), [path.join('/w', 'track2.srt'), path.join('/w', 'track2.vtt'), '/w/out.mkv'].sort());
+});
+
+const runStubbed = (vttText) => {
+  const calls = [];
+  const vtt = path.join('/w', 'track2.vtt');
+  stubs = {
+    fs: {
+      existsSync: (p) => (p === vtt ? vttText !== null : true),
+      unlinkSync: () => {},
+      readFileSync: (p) => {
+        if (p !== vtt || vttText === null) throw new Error('unexpected read ' + p);
+        return vttText;
+      },
+    },
+    child_process: {
+      spawnSync: (cmd, args) => {
+        calls.push(cmd);
+        if (cmd === 'mkvmerge' && args[0] === '-J') return { status: 0, stdout: JSON.stringify({ tracks: goodBoyTracks }) };
+        if (cmd === 'mkvmerge') return { status: 2, stdout: 'stop here' };
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    },
+  };
+  try {
+    const res = call(
+      { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: goodBoyStreams, format: { duration: '100' } } },
+      { cacheFilePath: '/w/out.mkv', ffmpegPath: 'tdarr-ffmpeg', mkvpropeditPath: 'mkvpropedit' },
+    );
+    return { res, calls };
+  } finally {
+    stubs = null;
+  }
+};
+
+test('plugin: a WebVTT file mkvextract did not write fails the job instead of dropping the track', () => {
+  const { res, calls } = runStubbed(null);
+  assert.match(res.error, /extracted track 2 is missing/);
+  assert.strictEqual(res.file._id, '/m/a.mkv');
+  assert.ok(!calls.includes('tdarr-ffmpeg'));
+});
+
+test('plugin: an extracted file without the WEBVTT signature fails the job', () => {
+  const { res } = runStubbed('garbage\n00:00:01.000 --> 00:00:02.000\nHello\n');
+  assert.match(res.error, /extracted track 2 is not a WebVTT file/);
+});
+
+test('plugin: a valid WebVTT file with no text cues is dropped (mkvmerge runs without it)', () => {
+  const { res } = runStubbed('﻿WEBVTT\n');
+  assert.match(res.infoLog, /WebVTT track 2 has no cues with text \(0 cues\), dropping it/);
+  assert.match(res.error, /mkvmerge failed/); // the stub stops the run at the mux
 });
 
 test('details: id matches the filename', () => {
