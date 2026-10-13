@@ -102,6 +102,18 @@ test('readTrackEntries: fails clearly on a non-Matroska file, a Cluster before T
   assert.throws(() => readTrackEntries(readerOf(h.slice(0, 80))), /truncated|no Tracks element/);
 });
 
+test('readTrackEntries: refuses a Tracks element claiming more than 16 MB', () => {
+  const h = mkvHeader([{ type: 'video', codec: 'V' }]);
+  // Rewrite the Tracks element's 8-byte size to 1 GB.
+  const at = h.indexOf(Buffer.from('1654ae6b', 'hex'));
+  const bad = Buffer.from(h);
+  bad.writeUIntBE(1024 * 1024 * 1024, at + 4 + 2, 6);
+  let asked = 0;
+  assert.throws(() => readTrackEntries((pos, len) => { asked = Math.max(asked, len); return bad.slice(pos, pos + len); }),
+    /Tracks element claims 1073741824 bytes; the file looks corrupt/);
+  assert.ok(asked <= 16, 'never asked for the claimed size');
+});
+
 test('mapTracks: Good Boy maps 1:1; cover art and attachments are ignored', () => {
   const streams = goodBoyStreams.concat([
     { index: 3, codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 1 } },
@@ -281,6 +293,12 @@ test('buildMerge: drop-only plan has no SRT inputs', () => {
   const built = buildMerge('/in/d.mkv', '/out/d.mkv', tracks, plan, {});
   assert.deepStrictEqual(built.args, ['-o', '/out/d.mkv', '--subtitle-tracks', '!2', '/in/d.mkv', '--track-order', '0:0,0:1']);
   assert.deepStrictEqual(built.layout.map((l) => [l.track.id, l.converted]), [[0, false], [1, false]]);
+});
+
+test('buildMerge: nothing to convert or drop gives a plain remux (no empty --subtitle-tracks)', () => {
+  const tracks = goodBoyTracks.slice(0, 2);
+  const built = buildMerge('/in/f.mkv', '/out/f.mkv', tracks, { convert: [], drop: [] }, {});
+  assert.deepStrictEqual(built.args, ['-o', '/out/f.mkv', '/in/f.mkv', '--track-order', '0:0,0:1']);
 });
 
 test('buildMerge: converted track with no language falls back to und', () => {
@@ -922,6 +940,28 @@ test('plugin: a buttons track in the middle is dropped with a log line; IDs and 
   assert.deepStrictEqual(merge.slice(1, 6), ['-o', '/w/out.mkv', '--subtitle-tracks', '!3', '/m/a.mkv']);
   assert.strictEqual(merge[merge.length - 1], '0:0,0:2,1:0');
   assert.match(res.infoLog, /0 \(video\) 2500, 1 \(audio\) 4300\./);
+});
+
+test('plugin: an unreadable subtitle stream that belongs to a non-AV track is dropped with that track', () => {
+  // ffprobe shows a metadata-type TrackEntry with a codec it can't decode as an unreadable subtitle stream.
+  const header = mkvHeader([{ type: 'video', codec: 'V_MPEG4/ISO/AVC' }, { type: 'audio', codec: 'A_AAC' }, { type: 'metadata', codec: 'S_TEXT/WEBVTT' }]);
+  const { res, calls } = run({
+    header,
+    srcTracks: goodBoyTracks.slice(0, 2),
+    inFormat: { duration: '120' },
+    outTracks: [outTracksGB[0], outTracksGB[1]],
+    outStreams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2500' },
+      { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' },
+    ],
+  });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.match(res.infoLog, /Track 2 in the file \(metadata, S_TEXT\/WEBVTT\) is not a video, audio or subtitle track; mkvmerge can't read it, so it is dropped\./);
+  assert.doesNotMatch(res.infoLog, /undefined/);
+  assert.deepStrictEqual(cmds(calls, 'mkvextract'), []);
+  const merge = cmds(calls, 'mkvmerge').find((x) => x[1] === '-o');
+  assert.deepStrictEqual(merge.slice(1), ['-o', '/w/out.mkv', '/m/a.mkv', '--track-order', '0:0,0:1']);
+  assert.strictEqual(res.file._id, '/w/out.mkv');
 });
 
 test('plugin: a metadata track ffprobe lists without a type is dropped with a log line', () => {
