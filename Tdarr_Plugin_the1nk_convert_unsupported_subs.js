@@ -9,7 +9,7 @@ const details = () => {
     Type: "Video",
     Operation: "Transcode",
     Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT, and muxed back in their original position with their language, name and flags. Cues with no visible text are left out; a WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track. The result is verified before it is used (track layout and codecs, cue counts of converted tracks, an exact packet count for every kept track, duration); if anything fails the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
-    Version: "1.02",
+    Version: "1.03",
     Tags: "pre-processing,mkvmerge,subtitle",
     Inputs: [],
   };
@@ -178,10 +178,34 @@ var vttProblem = function (text) {
   return null;
 };
 
-// A packet count from ffprobe -count_packets ('N/A' means none were read), or NaN.
+// A packet count, or NaN. Tdarr's ffprobe (7.1.4) prints nb_read_packets as N/A (and leaves it
+// out of JSON) both when packets weren't counted and when a counted stream has none, so N/A is
+// never read as a number: the plugin lists that stream's packets instead (sumPacketCsv).
 var packetCount = function (v) {
-  if (v === 'N/A') return 0;
   return (typeof v === 'number' || /^\d+$/.test(String(v))) ? Number(v) : NaN;
+};
+
+// Packets and payload bytes from "-show_entries packet=size -of csv=p=0" (one row per packet).
+var sumPacketCsv = function (text) {
+  var r = { packets: 0, bytes: 0 };
+  String(text || '').split(/\r?\n/).forEach(function (line) {
+    if (line === '') return;
+    r.packets += 1;
+    r.bytes += /^\d+$/.test(line) ? Number(line) : NaN;
+  });
+  return r;
+};
+
+// How a kept track is proven complete. Measured in the Tdarr node by remuxing with mkvmerge v99
+// (audio-only "-D -S -B -M") and comparing per-stream packets and summed packet bytes, on library
+// files muxed by FFmpeg (Lavf57/61) and by mkvmerge (v4.5 to v71): ac3, eac3 (incl. Atmos), dts
+// (core and DTS-HD MA), truehd, mp3, opus and aac keep every packet as-is (equal counts and bytes).
+// The library has no flac, alac, vorbis or PCM; on synthetic FFmpeg- and mkvmerge-muxed files
+// flac, alac and vorbis also match, but PCM from an FFmpeg-muxed source is re-packetized
+// (pcm_s16le/s24le 2813 -> 1500 packets) with identical bytes. So PCM is compared by payload
+// bytes and everything else by packet count.
+var comparesBytes = function (codecName) {
+  return /^pcm_/.test(String(codecName || ''));
 };
 
 // The verification gate. Returns why the output can't be used, or null.
@@ -213,18 +237,30 @@ var verifyOutput = function (v) {
     if (isUnreadable(s)) return 'output subtitle stream ' + s.index + ' is still unreadable';
     var sl = v.layout[s.index];
     if (!sl || sl.track.type !== 'subtitles') return 'output stream ' + s.index + ' is a subtitle stream but not a subtitle track in the layout';
-    if (sl.converted && packetCount(s.nb_read_packets) !== v.expectedPackets[sl.track.id]) {
-      return 'output stream ' + s.index + ' has ' + packetCount(s.nb_read_packets) + ' cues, expected ' + v.expectedPackets[sl.track.id];
+    if (!sl.converted) continue;
+    var cues = packetCount(s.nb_read_packets);
+    if (!(cues >= 0)) return 'output stream ' + s.index + ' has no packet count';
+    if (cues !== v.expectedPackets[sl.track.id]) {
+      return 'output stream ' + s.index + ' has ' + cues + ' cues, expected ' + v.expectedPackets[sl.track.id];
     }
   }
   // A remux keeps every packet of every track it keeps, so each kept (not converted) track
-  // must have exactly as many packets as its source stream. This catches any truncation,
-  // however short, without relying on durations.
+  // must have exactly as many packets (PCM: payload bytes, see comparesBytes) as its source
+  // stream. This catches any truncation, however short, without relying on durations.
   for (var k = 0; k < v.layout.length; k += 1) {
     var kl = v.layout[k];
     if (kl.converted) continue;
     var os = streams.find(function (x) { return x.index === k; });
     var kind = os ? os.codec_type : kl.track.type;
+    if (os && comparesBytes(os.codec_name)) {
+      var label = 'output stream ' + k + ' (' + kind + ', ' + os.codec_name + ')';
+      var gotBytes = (v.outBytes || {})[k];
+      var srcBytes = (v.inBytes || {})[kl.track.id];
+      if (!(gotBytes >= 0)) return label + ' has no byte count';
+      if (!(srcBytes >= 0)) return 'source stream ' + kl.track.id + ' has no byte count';
+      if (gotBytes !== srcBytes) return label + ' has ' + gotBytes + ' bytes, source has ' + srcBytes;
+      continue;
+    }
     var got = packetCount(os && os.nb_read_packets);
     if (!(got >= 0)) return 'output stream ' + k + ' (' + kind + ') has no packet count';
     var src = packetCount((v.inPackets || {})[kl.track.id]);
@@ -322,12 +358,23 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     var probe = function (args, p) {
       var r = run(ffprobe, ['-v', 'error'].concat(args, ['-of', 'json', '--', p]));
       if (r.error || r.status !== 0) throw new Error('ffprobe failed on ' + p + ' (' + exitOf(r) + '): ' + why(r));
-      return JSON.parse(r.stdout);
+      try {
+        return JSON.parse(r.stdout);
+      } catch (e) {
+        throw new Error('ffprobe returned no JSON for ' + p);
+      }
     };
 
     // The input duration, measured if Tdarr's probe data lacks it (the duration check needs it).
     var inFormat = (file.ffProbeData && file.ffProbeData.format) || {};
-    if (!(Number(inFormat.duration) > 0)) inFormat = probe(['-show_entries', 'format=duration'], file._id).format || {};
+    if (!(Number(inFormat.duration) > 0)) {
+      try {
+        inFormat = probe(['-show_entries', 'format=duration'], file._id).format || {};
+      } catch (e) {
+        response.infoLog += e.message + '\r\n';
+        inFormat = {};
+      }
+    }
     var inDuration = Number(inFormat.duration) || 0;
     if (!(inDuration > 0)) throw new Error('could not measure the input duration');
 
@@ -399,11 +446,38 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     var outProbe = probe(['-count_packets',
       '-show_entries', 'stream=index,codec_type,codec_name,nb_read_packets:format=duration'], outPath);
     var outStreams = outProbe.streams || [];
+    // One stream's packets listed (exact, including none): for PCM bytes, and for any count
+    // ffprobe printed as N/A (see packetCount). Only these streams are listed.
+    var listPackets = function (p, idx) {
+      var r = spawnSync(ffprobe, ['-v', 'error', '-select_streams', String(idx),
+        '-show_entries', 'packet=size', '-of', 'csv=p=0', '--', p], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+      if (r.error || r.status !== 0) throw new Error('ffprobe packet listing failed on ' + p + ' stream ' + idx + ' (' + exitOf(r) + '): ' + why(r));
+      return sumPacketCsv(r.stdout);
+    };
+    var inBytes = {};
+    var outBytes = {};
+    built.layout.forEach(function (l, i) {
+      var os = outStreams.find(function (x) { return x.index === i; });
+      if (!os) return;
+      var bytes = !l.converted && comparesBytes(os.codec_name);
+      if (bytes || !(packetCount(os.nb_read_packets) >= 0)) {
+        var o = listPackets(outPath, i);
+        os.nb_read_packets = o.packets;
+        outBytes[i] = o.bytes;
+      }
+      if (!l.converted && (bytes || !(packetCount(inPackets[l.track.id]) >= 0))) {
+        var s = listPackets(file._id, l.track.id);
+        inPackets[l.track.id] = s.packets;
+        inBytes[l.track.id] = s.bytes;
+      }
+    });
     var problem = verifyOutput({
       layout: built.layout,
       outTracks: outTracks,
       outStreams: outStreams,
       inPackets: inPackets,
+      inBytes: inBytes,
+      outBytes: outBytes,
       expectedPackets: expectedPackets,
       inDuration: inDuration,
       outDuration: Number((outProbe.format || {}).duration) || 0,
@@ -415,7 +489,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     built.layout.forEach(function (l, i) {
       if (l.converted) return;
       var s = outStreams.find(function (x) { return x.index === i; }) || {};
-      kept.push(i + ' (' + s.codec_type + ') ' + packetCount(s.nb_read_packets));
+      kept.push(i + ' (' + s.codec_type + ') ' + (comparesBytes(s.codec_name) ? outBytes[i] + ' bytes' : packetCount(s.nb_read_packets)));
     });
     response.infoLog += 'Verified: ' + outTracks.length + ' tracks, every subtitle track readable, cue counts match; '
       + 'packets per kept stream match the source: ' + (kept.join(', ') || 'none') + '.\r\n';
@@ -443,6 +517,9 @@ module.exports._test = {
   toolFailed: toolFailed,
   cueStats: cueStats,
   vttProblem: vttProblem,
+  packetCount: packetCount,
+  sumPacketCsv: sumPacketCsv,
+  comparesBytes: comparesBytes,
   verifyOutput: verifyOutput,
   pickFfprobe: pickFfprobe,
 };

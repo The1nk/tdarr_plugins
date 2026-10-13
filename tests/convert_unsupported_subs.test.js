@@ -18,7 +18,7 @@ Module._load = function (request, parent, isMain) {
 const pluginModule = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'));
 const {
   findUnreadableSubs, planTracks, buildMerge, toolFailed, cueStats, verifyOutput, pickFfprobe,
-  vttProblem,
+  vttProblem, packetCount, sumPacketCsv, comparesBytes,
 } = pluginModule._test;
 
 // Trimmed from the real "Good Boy (2025)" file.
@@ -322,9 +322,9 @@ test('verifyOutput: subtitle stream that is not a subtitle in the layout', () =>
   assert.match(verifyOutput(okOutput({ outStreams: odd })), /stream 1 .*not a subtitle/);
 });
 
-test('verifyOutput: converted cue count mismatch (including N/A packets)', () => {
+test('verifyOutput: converted cue count mismatch; an unresolved N/A count fails', () => {
   assert.match(verifyOutput(okOutput({ outStreams: withStream(2, { nb_read_packets: '284' }) })), /284 cues, expected 285/);
-  assert.match(verifyOutput(okOutput({ outStreams: withStream(2, { nb_read_packets: 'N/A' }) })), /0 cues, expected 285/);
+  assert.match(verifyOutput(okOutput({ outStreams: withStream(2, { nb_read_packets: 'N/A' }) })), /output stream 2 has no packet count/);
 });
 
 test('verifyOutput: a kept video or audio stream short by one packet fails', () => {
@@ -383,12 +383,52 @@ test('verifyOutput: a kept stream ffprobe did not report, or a source count that
   assert.match(verifyOutput(v), /output stream 0 \(video\) has no packet count/);
   assert.match(verifyOutput(okOutput({ inPackets: { 1: '212102', 2: '285' } })), /source stream 0 has no packet count/);
   assert.match(verifyOutput(okOutput({ inPackets: { 0: 'garbage', 1: '212102', 2: '285' } })), /source stream 0 has no packet count/);
-  // ffprobe reports N/A for a stream with no packets: that is 0, and must match on both sides.
-  assert.strictEqual(verifyOutput(okOutput({ inPackets: { 0: 'N/A', 1: '212102', 2: '285' } })),
-    'output stream 0 (video) has 108595 packets, source has 0');
-  assert.strictEqual(verifyOutput(okOutput({
+  // N/A is never taken as a number (the plugin resolves it by listing the stream's packets first).
+  assert.match(verifyOutput(okOutput({ inPackets: { 0: 'N/A', 1: '212102', 2: '285' } })), /source stream 0 has no packet count/);
+  assert.match(verifyOutput(okOutput({
     inPackets: { 0: '108595', 1: 'N/A', 2: '285' }, outStreams: withStream(1, { nb_read_packets: 'N/A' }),
+  })), /output stream 1 \(audio\) has no packet count/);
+  // A resolved count of 0 on both sides (an empty kept track) passes.
+  assert.strictEqual(verifyOutput(okOutput({
+    inPackets: { 0: '108595', 1: 0, 2: '285' }, outStreams: withStream(1, { nb_read_packets: 0 }),
   })), null);
+});
+
+test('packetCount: digits or numbers; N/A, missing and garbage are NaN', () => {
+  assert.strictEqual(packetCount('42'), 42);
+  assert.strictEqual(packetCount(0), 0);
+  assert.ok(Number.isNaN(packetCount('N/A')));
+  assert.ok(Number.isNaN(packetCount(undefined)));
+  assert.ok(Number.isNaN(packetCount('4x')));
+});
+
+test('sumPacketCsv: rows of "-show_entries packet=size -of csv=p=0"', () => {
+  assert.deepStrictEqual(sumPacketCsv('7680\n7680\r\n3840\n'), { packets: 3, bytes: 19200 });
+  assert.deepStrictEqual(sumPacketCsv(''), { packets: 0, bytes: 0 });
+  assert.deepStrictEqual(sumPacketCsv('12\nN/A\n'), { packets: 2, bytes: NaN });
+});
+
+test('comparesBytes: PCM is compared by payload bytes, everything else by packets', () => {
+  ['pcm_s16le', 'pcm_s24le', 'pcm_s32le', 'pcm_f32le', 'pcm_s16be', 'pcm_u8'].forEach((c) => assert.ok(comparesBytes(c), c));
+  ['flac', 'truehd', 'dts', 'mp3', 'opus', 'vorbis', 'ac3', 'eac3', 'aac', 'alac', 'h264', 'subrip', undefined].forEach((c) => assert.ok(!comparesBytes(c), c));
+});
+
+// PCM from an FFmpeg-muxed source: mkvmerge re-packetizes (2813 -> 1500 packets), bytes are equal.
+const pcmOutput = (outBytes, over) => okOutput(Object.assign({
+  outStreams: withStream(1, { codec_name: 'pcm_s16le', nb_read_packets: '1500' }),
+  inPackets: { 0: '108595', 1: '2813', 2: '285' },
+  inBytes: { 1: 11520000 },
+  outBytes: { 1: outBytes },
+}, over));
+
+test('verifyOutput: PCM passes on equal bytes despite different packet counts', () => {
+  assert.strictEqual(verifyOutput(pcmOutput(11520000)), null);
+});
+
+test('verifyOutput: PCM short by one byte, or with bytes not measured, fails', () => {
+  assert.strictEqual(verifyOutput(pcmOutput(11519999)), 'output stream 1 (audio, pcm_s16le) has 11519999 bytes, source has 11520000');
+  assert.match(verifyOutput(pcmOutput(undefined)), /output stream 1 \(audio, pcm_s16le\) has no byte count/);
+  assert.match(verifyOutput(pcmOutput(11520000, { inBytes: {} })), /source stream 1 has no byte count/);
 });
 
 test('verifyOutput: strict +-1s duration when nothing was lost; input duration is required', () => {
@@ -540,19 +580,24 @@ test('plugin: a valid WebVTT file with no text cues is dropped (mkvmerge runs wi
 });
 
 // A full stubbed run: extract, convert, mux, then the verification probes.
-const runFull = (outVideoPackets) => {
+// opts.inFormat replaces Tdarr's format probe data; opts.durationProbe is what the stubbed
+// ffprobe prints for "-show_entries format=duration" (stdout text). opts.inAudio / opts.outAudio
+// override the audio stream's count entries; opts.listings maps "<file>#<stream>" to the stubbed
+// "-show_entries packet=size" output.
+const runFull = (outVideoPackets, opts) => {
+  const o = opts || {};
   const calls = [];
   const unlinked = [];
   const files = {};
   files[path.join('/w', 'track2.vtt')] = vtt4;
   files[path.join('/w', 'track2.srt')] = srt4;
-  const inCounts = { streams: [{ index: 0, nb_read_packets: '2500' }, { index: 1, nb_read_packets: '4300' }, { index: 2, nb_read_packets: '4' }] };
+  const inCounts = { streams: [{ index: 0, nb_read_packets: '2500' }, Object.assign({ index: 1, nb_read_packets: '4300' }, o.inAudio), { index: 2, nb_read_packets: '4' }] };
   const outProbe = {
     streams: [
       { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: outVideoPackets },
-      { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' },
+      Object.assign({ index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' }, o.outAudio),
       { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '2' },
-    ],
+    ].map((x) => JSON.parse(JSON.stringify(x))),
     format: { duration: '100.2' },
   };
   const outTracks = goodBoyTracks.slice(0, 2).concat([{ id: 2, type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } }]);
@@ -572,6 +617,12 @@ const runFull = (outVideoPackets) => {
           return { status: 0, stdout: JSON.stringify({ tracks: args[1] === '/w/out.mkv' ? outTracks : goodBoyTracks }) };
         }
         if (/ffprobe$/.test(cmd)) {
+          if (args.includes('format=duration')) return { status: 0, stdout: o.durationProbe };
+          if (args.includes('packet=size')) {
+            const key = args[args.length - 1] + '#' + args[args.indexOf('-select_streams') + 1];
+            if (!o.listings || !(key in o.listings)) throw new Error('unexpected listing ' + key);
+            return { status: 0, stdout: o.listings[key] };
+          }
           return { status: 0, stdout: JSON.stringify(args[args.length - 1] === '/w/out.mkv' ? outProbe : inCounts) };
         }
         return { status: 0, stdout: '', stderr: '' };
@@ -580,7 +631,7 @@ const runFull = (outVideoPackets) => {
   };
   try {
     const res = call(
-      { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: goodBoyStreams, format: { duration: '100' } } },
+      { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: goodBoyStreams, format: o.inFormat || { duration: '100' } } },
       { cacheFilePath: '/w/out.mkv', ffmpegPath: 'tdarr-ffmpeg', mkvpropeditPath: 'mkvpropedit' },
     );
     return { res, calls, unlinked };
@@ -599,6 +650,36 @@ test('plugin: verifies kept tracks by packet counts against the source and hands
   assert.ok(!probes[1].includes('-select_streams'), 'output pass covers every stream');
   assert.match(res.infoLog, /0 \(video\) 2500, 1 \(audio\) 4300/);
   assert.ok(!unlinked.includes('/w/out.mkv'));
+  assert.ok(!calls.some((c) => c.includes('packet=size')), 'no packet listing when every count is known');
+});
+
+const listingCalls = (calls) => calls.filter((c) => c.includes('packet=size'))
+  .map((c) => c[c.length - 1] + '#' + c[c.indexOf('-select_streams') + 1]).sort();
+
+test('plugin: PCM is verified by payload bytes listed on both files', () => {
+  const pcm = {
+    inAudio: { nb_read_packets: '2813' },
+    outAudio: { codec_name: 'pcm_s16le', nb_read_packets: '1500' },
+    listings: { '/m/a.mkv#1': '4000\n4000\n4000\n', '/w/out.mkv#1': '6000\n6000\n' },
+  };
+  const { res, calls } = runFull('2500', pcm);
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.deepStrictEqual(listingCalls(calls), ['/m/a.mkv#1', '/w/out.mkv#1']);
+  assert.match(res.infoLog, /1 \(audio\) 12000 bytes/);
+  const short = runFull('2500', Object.assign({}, pcm, { listings: { '/m/a.mkv#1': '4000\n4000\n4000\n', '/w/out.mkv#1': '6000\n5999\n' } }));
+  assert.match(short.res.error, /output stream 1 \(audio, pcm_s16le\) has 11999 bytes, source has 12000/);
+});
+
+test('plugin: an unknown (N/A) packet count is resolved by listing that stream, exactly', () => {
+  // ffprobe leaves nb_read_packets out of JSON for a stream with no packets.
+  const empty = { inAudio: { nb_read_packets: undefined }, outAudio: { nb_read_packets: undefined }, listings: { '/m/a.mkv#1': '', '/w/out.mkv#1': '' } };
+  const { res, calls } = runFull('2500', empty);
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.deepStrictEqual(listingCalls(calls), ['/m/a.mkv#1', '/w/out.mkv#1']);
+  assert.match(res.infoLog, /1 \(audio\) 0/);
+  // Source unknown and really 3 packets; output counted 2: fails.
+  const lost = runFull('2500', { inAudio: { nb_read_packets: 'N/A' }, outAudio: { nb_read_packets: '2' }, listings: { '/m/a.mkv#1': '9\n9\n9\n' } });
+  assert.match(lost.res.error, /output stream 1 \(audio\) has 2 packets, source has 3/);
 });
 
 test('plugin: a kept stream short by one packet fails the job and removes the output', () => {
@@ -606,6 +687,28 @@ test('plugin: a kept stream short by one packet fails the job and removes the ou
   assert.match(res.error, /output stream 0 \(video\) has 2499 packets, source has 2500/);
   assert.strictEqual(res.file._id, '/m/a.mkv');
   assert.ok(unlinked.includes('/w/out.mkv'));
+});
+
+const durationProbes = (calls) => calls.filter((c) => /ffprobe$/.test(c[0]) && c.includes('format=duration'));
+
+test('plugin: no duration in the probe data: measures it with ffprobe and uses the result', () => {
+  const { res, calls } = runFull('2500', { inFormat: {}, durationProbe: JSON.stringify({ format: { duration: '100.000000' } }) });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  const d = durationProbes(calls);
+  assert.strictEqual(d.length, 1);
+  assert.strictEqual(d[0][d[0].length - 1], '/m/a.mkv');
+  // The measured value is the one checked: a measured 50s makes the 100.2s output too long.
+  const short = runFull('2500', { inFormat: { duration: '0' }, durationProbe: JSON.stringify({ format: { duration: '50' } }) });
+  assert.match(short.res.error, /output is longer than the input: 100.2s vs 50s/);
+});
+
+test('plugin: no duration in the probe data and ffprobe returns nothing: the job fails before muxing', () => {
+  ['', '{}', JSON.stringify({ format: {} }), JSON.stringify({ format: { duration: 'N/A' } })].forEach((out) => {
+    const { res, calls } = runFull('2500', { inFormat: {}, durationProbe: out });
+    assert.match(res.error, /could not measure the input duration/, JSON.stringify(out));
+    assert.strictEqual(res.file._id, '/m/a.mkv');
+    assert.ok(!calls.some((c) => c[0] === 'mkvextract'), 'stopped before extracting');
+  });
 });
 
 test('details: id matches the filename', () => {
