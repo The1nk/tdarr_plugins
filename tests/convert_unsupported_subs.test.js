@@ -18,7 +18,8 @@ Module._load = function (request, parent, isMain) {
 const pluginModule = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'));
 const {
   findUnreadableSubs, planTracks, buildMerge, toolFailed, cueStats, verifyOutput, pickFfprobe,
-  vttProblem, packetCount, sumPacketCsv, comparesBytes,
+  vttProblem, packetCount, sumPacketCsv, comparesBytes, checkTrackMapping, filtersBlankBlocks,
+  parseExtractedSrt, keptTextStats,
 } = pluginModule._test;
 
 // Trimmed from the real "Good Boy (2025)" file.
@@ -52,19 +53,35 @@ test('findUnreadableSubs: missing stream list', () => {
   assert.deepStrictEqual(findUnreadableSubs(undefined), []);
 });
 
+test('checkTrackMapping: tracks line up by index and type; cover art and attachments are not tracks', () => {
+  const streams = goodBoyStreams.concat([
+    { index: 3, codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 1 } },
+    { index: 4, codec_type: 'attachment', codec_name: 'ttf' },
+  ]);
+  assert.strictEqual(checkTrackMapping(streams, goodBoyTracks), null);
+});
+
+test('checkTrackMapping: a different track count or type fails', () => {
+  assert.match(checkTrackMapping(goodBoyStreams.slice(0, 2), goodBoyTracks), /ffprobe sees 2 tracks, mkvmerge 3/);
+  const swapped = [goodBoyStreams[1], goodBoyStreams[0], goodBoyStreams[2]].map((s, i) => Object.assign({}, s, { index: i }));
+  assert.match(checkTrackMapping(swapped, goodBoyTracks), /stream 0 is audio, mkvmerge track 0 is video/);
+  const offset = goodBoyStreams.map((s) => Object.assign({}, s, { index: s.index + 1 }));
+  assert.match(checkTrackMapping(offset, goodBoyTracks), /stream 1 .* mkvmerge track 0/);
+  assert.match(checkTrackMapping(undefined, goodBoyTracks), /ffprobe sees 0 tracks/);
+});
+
 test('planTracks: S_TEXT/WEBVTT is converted, other unreadable subtitles are dropped', () => {
   const tracks = goodBoyTracks.concat([
     { id: 3, type: 'subtitles', codec: 'HDMV TextST', properties: { codec_id: 'S_HDMV/TEXTST' } },
   ]);
   const plan = planTracks(tracks, [2, 3]);
-  assert.strictEqual(plan.error, undefined);
   assert.deepStrictEqual(plan.convert.map((t) => t.id), [2]);
   assert.deepStrictEqual(plan.drop.map((t) => t.id), [3]);
 });
 
-test('planTracks: error when the ffprobe index is not an mkvmerge subtitle track', () => {
-  assert.match(planTracks(goodBoyTracks, [1]).error, /stream 1/);
-  assert.match(planTracks(goodBoyTracks, [7]).error, /stream 7/);
+test('planTracks: throws when the ffprobe index is not an mkvmerge subtitle track', () => {
+  assert.throws(() => planTracks(goodBoyTracks, [1]), /stream 1/);
+  assert.throws(() => planTracks(goodBoyTracks, [7]), /stream 7/);
 });
 
 test('buildMerge: Good Boy layout matches the hand-verified mkvmerge command', () => {
@@ -226,12 +243,12 @@ test('cueStats: whitespace, supported tags, entities, multi-line and CRLF payloa
   assert.strictEqual(s.muxed, 6); // all but the empty entry 1; mkvmerge keeps "<i> </i>" and "\h"
 });
 
-test('cueStats: mkvmerge only treats ASCII whitespace as blank', () => {
+test('cueStats: mkvmerge treats only space, tab, CR and LF as blank (NBSP, form feed, vertical tab are kept)', () => {
   const srt = '1\n00:00:01,000 --> 00:00:02,000\n \t \n\n2\n00:00:03,000 --> 00:00:04,000\n\u00a0\n\n'
-    + '3\n00:00:05,000 --> 00:00:06,000\nX\n\n';
+    + '3\n00:00:05,000 --> 00:00:06,000\nX\n\n4\n00:00:07,000 --> 00:00:08,000\n\f\n\n5\n00:00:09,000 --> 00:00:10,000\n\v\n\n';
   const s = cueStats(srt, 'srt');
   assert.strictEqual(s.content, 1);
-  assert.strictEqual(s.muxed, 2);
+  assert.strictEqual(s.muxed, 4);
 });
 
 test('cueStats: empty, header-only and missing text have no cues', () => {
@@ -263,34 +280,78 @@ test('vttProblem: extracted file must exist and start with the WEBVTT signature'
   assert.strictEqual(vttProblem(vtt4), null);
 });
 
+// --- kept text subtitle tracks that mkvmerge filters ---
+
+test('filtersBlankBlocks: only S_TEXT/UTF8 and S_TEXT/ASCII', () => {
+  ['S_TEXT/UTF8', 'S_TEXT/ASCII'].forEach((c) => assert.ok(filtersBlankBlocks(c), c));
+  ['S_TEXT/ASS', 'S_TEXT/SSA', 'S_TEXT/USF', 'S_TEXT/WEBVTT', 'S_HDMV/PGS', 'S_VOBSUB', 'S_DVBSUB', 'A_AAC', undefined]
+    .forEach((c) => assert.ok(!filtersBlankBlocks(c), c));
+});
+
+// The reviewer's reproducer: an FFmpeg-muxed, stream-copied SRT track with a "   " cue (4 packets),
+// as mkvextract writes it. mkvmerge keeps 3 blocks.
+const keptSrt4 = '\uFEFF1\n00:00:01,000 --> 00:00:02,000\nOne\n\n2\n00:00:03,000 --> 00:00:04,000\n   \n\n'
+  + '3\n00:00:05,000 --> 00:00:06,000\nThree\n\n4\n00:00:07,000 --> 00:00:08,000\nFour\n\n';
+
+test('keptTextStats: reviewer reproducer, 4 blocks extracted, 3 kept', () => {
+  assert.deepStrictEqual(keptTextStats(keptSrt4), { entries: 4, kept: 3 });
+});
+
+test('keptTextStats: the measured block rule (blank = only space, tab, CR, LF)', () => {
+  // The blocks measured in the container: "Normal", "   ", tab, NBSP, "<i></i>", "<i> </i>",
+  // "{\an8}", " \n ", "End" -> mkvmerge kept Normal, NBSP, <i></i>, <i> </i>, {\an8}, End.
+  const texts = ['Normal', '   ', '\t', '\u00a0', '<i></i>', '<i> </i>', '{\\an8}', ' \n ', 'End'];
+  const srt = texts.map((t, i) => (i + 1) + '\n00:00:0' + i + ',000 --> 00:00:0' + i + ',500\n' + t + '\n\n').join('');
+  assert.deepStrictEqual(keptTextStats(srt), { entries: 9, kept: 6 });
+  assert.deepStrictEqual(keptTextStats('1\n00:00:01,000 --> 00:00:02,000\n\f\n\n'), { entries: 1, kept: 1 });
+});
+
+test('parseExtractedSrt: entries split on the numbered headers, so blank lines inside a block stay in it', () => {
+  const srt = '\uFEFF1\n00:00:01,000 --> 00:00:01,500\nA\n\n2\n00:00:02,000 --> 00:00:02,500\nfirst\n\nsecond\n\n'
+    + '3\n00:00:03,000 --> 00:00:03,500\n\n\nlate\n\n4\n00:00:04,000 --> 00:00:04,500\n\n\n';
+  const e = parseExtractedSrt(srt);
+  assert.strictEqual(e.length, 4);
+  assert.match(e[1], /first\n\nsecond/);
+  assert.match(e[2], /late/);
+  assert.deepStrictEqual(keptTextStats(srt), { entries: 4, kept: 3 });
+  // A block whose text looks like a number but isn't the next header stays text.
+  assert.strictEqual(parseExtractedSrt('1\n00:00:01,000 --> 00:00:02,000\n7\n\n2\n00:00:03,000 --> 00:00:04,000\nB\n\n').length, 2);
+  assert.deepStrictEqual(parseExtractedSrt(''), []);
+  assert.deepStrictEqual(keptTextStats(null), { entries: 0, kept: 0 });
+});
+
+// --- verifyOutput ---
+
 const layoutGB = [
   { track: goodBoyTracks[0], converted: false },
   { track: goodBoyTracks[1], converted: false },
   { track: goodBoyTracks[2], converted: true },
 ];
+const srtOut = { codec_id: 'S_TEXT/UTF8', language: 'eng', language_ietf: 'en', default_track: true, forced_track: false };
 const outTracksGB = [
   { type: 'video', properties: { codec_id: 'V_MPEG4/ISO/AVC' } },
   { type: 'audio', properties: { codec_id: 'A_AAC' } },
-  { type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } },
+  { type: 'subtitles', properties: srtOut },
 ];
 const outStreamsGB = [
-  { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '108595' },
-  { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '212102' },
-  { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '285' },
+  { index: 0, codec_type: 'video', codec_name: 'h264' },
+  { index: 1, codec_type: 'audio', codec_name: 'aac' },
+  { index: 2, codec_type: 'subtitle', codec_name: 'subrip' },
 ];
-// Source packet counts by source stream index (stream 2 is the unreadable WebVTT track).
-const inPacketsGB = { 0: '108595', 1: '212102', 2: '285' };
 const okOutput = (over) => Object.assign({
   layout: layoutGB,
   outTracks: outTracksGB,
   outStreams: outStreamsGB,
-  inPackets: inPacketsGB,
+  srcCounts: { 0: { packets: 108595 }, 1: { packets: 212102 } },
+  outCounts: { 0: { packets: 108595 }, 1: { packets: 212102 }, 2: { packets: 285 } },
   expectedPackets: { 2: 285 },
+  extractedEntries: {},
   inDuration: 100,
   outDuration: 100.2,
   lossy: false,
 }, over);
-const withStream = (i, change) => outStreamsGB.map((s) => (s.index === i ? Object.assign({}, s, change) : s));
+const withOut = (pos, counts) => Object.assign({}, okOutput({}).outCounts, { [pos]: counts });
+const withOutTrack = (props) => [outTracksGB[0], outTracksGB[1], { type: 'subtitles', properties: Object.assign({}, srtOut, props) }];
 
 test('verifyOutput: passes a correct conversion (equal packet counts)', () => {
   assert.strictEqual(verifyOutput(okOutput({})), null);
@@ -303,8 +364,42 @@ test('verifyOutput: wrong track count', () => {
 test('verifyOutput: wrong type or codec at a position', () => {
   const swapped = [outTracksGB[1], outTracksGB[0], outTracksGB[2]];
   assert.match(verifyOutput(okOutput({ outTracks: swapped })), /output track 0 is audio/);
-  const stillVtt = outTracksGB.slice(0, 2).concat([{ type: 'subtitles', properties: { codec_id: 'S_TEXT/WEBVTT' } }]);
+  const stillVtt = withOutTrack({ codec_id: 'S_TEXT/WEBVTT' });
   assert.match(verifyOutput(okOutput({ outTracks: stillVtt })), /track 2 .*expected subtitles\/S_TEXT\/UTF8/);
+});
+
+test('verifyOutput: converted track metadata must match the source', () => {
+  assert.match(verifyOutput(okOutput({ outTracks: withOutTrack({ language_ietf: 'fr' }) })), /output track 2 language is fr, source has en/);
+  assert.match(verifyOutput(okOutput({ outTracks: withOutTrack({ default_track: false }) })), /output track 2 default_track is false, source has true/);
+  assert.match(verifyOutput(okOutput({ outTracks: withOutTrack({ forced_track: true }) })), /forced_track is true, source has false/);
+});
+
+test('verifyOutput: converted metadata compares only what the source defines, with mkvmerge defaults', () => {
+  const src = {
+    codec_id: 'S_TEXT/WEBVTT', language: 'spa', track_name: 'Spanish CC', forced_track: true,
+    flag_hearing_impaired: true, flag_commentary: false, enabled_track: false,
+  };
+  const layout = [layoutGB[0], layoutGB[1], { track: { id: 2, type: 'subtitles', properties: src }, converted: true }];
+  // What mkvmerge -J reports for the muxed track: language "spa" also gets language_ietf "es".
+  const out = {
+    codec_id: 'S_TEXT/UTF8', language: 'spa', language_ietf: 'es', track_name: 'Spanish CC', default_track: false,
+    forced_track: true, flag_hearing_impaired: true, flag_commentary: false, enabled_track: false,
+  };
+  const v = (props) => okOutput({ layout, outTracks: [outTracksGB[0], outTracksGB[1], { type: 'subtitles', properties: Object.assign({}, out, props) }] });
+  assert.strictEqual(verifyOutput(v({})), null);
+  assert.match(verifyOutput(v({ track_name: 'Other' })), /track_name is Other, source has Spanish CC/);
+  assert.match(verifyOutput(v({ language: 'eng' })), /language is eng, source has spa/);
+  assert.match(verifyOutput(v({ flag_hearing_impaired: false })), /flag_hearing_impaired is false, source has true/);
+  assert.match(verifyOutput(v({ flag_commentary: undefined })), /flag_commentary is undefined, source has false/);
+  assert.match(verifyOutput(v({ enabled_track: true })), /enabled_track is true, source has false/);
+  // Flags the source doesn't define are not compared.
+  assert.strictEqual(verifyOutput(v({ flag_original: true })), null);
+  // A source with no language at all must come out as und.
+  const bare = [layoutGB[0], layoutGB[1], { track: { id: 2, type: 'subtitles', properties: { codec_id: 'S_TEXT/WEBVTT' } }, converted: true }];
+  const und = { codec_id: 'S_TEXT/UTF8', language: 'und', language_ietf: 'und', default_track: false, forced_track: false };
+  assert.strictEqual(verifyOutput(okOutput({ layout: bare, outTracks: [outTracksGB[0], outTracksGB[1], { type: 'subtitles', properties: und }] })), null);
+  const eng = Object.assign({}, und, { language: 'eng', language_ietf: 'en' });
+  assert.match(verifyOutput(okOutput({ layout: bare, outTracks: [outTracksGB[0], outTracksGB[1], { type: 'subtitles', properties: eng }] })), /language is eng, source has und/);
 });
 
 test('verifyOutput: ffprobe must see one subtitle stream per layout subtitle', () => {
@@ -312,86 +407,103 @@ test('verifyOutput: ffprobe must see one subtitle stream per layout subtitle', (
 });
 
 test('verifyOutput: unreadable output subtitle stream', () => {
-  assert.match(verifyOutput(okOutput({ outStreams: withStream(2, { codec_name: undefined }) })), /stream 2 is still unreadable/);
+  const s = outStreamsGB.slice(0, 2).concat([{ index: 2, codec_type: 'subtitle' }]);
+  assert.match(verifyOutput(okOutput({ outStreams: s })), /stream 2 is still unreadable/);
 });
 
 test('verifyOutput: subtitle stream that is not a subtitle in the layout', () => {
-  const odd = [outStreamsGB[0],
-    { index: 1, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '212102' },
-    { index: 2, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '285' }];
+  const odd = [outStreamsGB[0], { index: 1, codec_type: 'subtitle', codec_name: 'subrip' }, { index: 2, codec_type: 'audio', codec_name: 'aac' }];
   assert.match(verifyOutput(okOutput({ outStreams: odd })), /stream 1 .*not a subtitle/);
 });
 
-test('verifyOutput: converted cue count mismatch; an unresolved N/A count fails', () => {
-  assert.match(verifyOutput(okOutput({ outStreams: withStream(2, { nb_read_packets: '284' }) })), /284 cues, expected 285/);
-  assert.match(verifyOutput(okOutput({ outStreams: withStream(2, { nb_read_packets: 'N/A' }) })), /output stream 2 has no packet count/);
+test('verifyOutput: converted cue count mismatch; a missing count fails', () => {
+  assert.match(verifyOutput(okOutput({ outCounts: withOut(2, { packets: 284 }) })), /284 cues, expected 285/);
+  assert.match(verifyOutput(okOutput({ outCounts: withOut(2, { packets: NaN }) })), /output stream 2 has no packet count/);
 });
 
 test('verifyOutput: a kept video or audio stream short by one packet fails', () => {
-  assert.strictEqual(
-    verifyOutput(okOutput({ outStreams: withStream(0, { nb_read_packets: '108594' }) })),
-    'output stream 0 (video) has 108594 packets, source has 108595',
-  );
-  assert.strictEqual(
-    verifyOutput(okOutput({ outStreams: withStream(1, { nb_read_packets: '212101' }) })),
-    'output stream 1 (audio) has 212101 packets, source has 212102',
-  );
-  // An extra packet is just as wrong.
-  assert.match(verifyOutput(okOutput({ outStreams: withStream(0, { nb_read_packets: '108596' }) })), /108596 packets, source has 108595/);
+  assert.strictEqual(verifyOutput(okOutput({ outCounts: withOut(0, { packets: 108594 }) })),
+    'output stream 0 (video) has 108594 packets, source has 108595');
+  assert.strictEqual(verifyOutput(okOutput({ outCounts: withOut(1, { packets: 212101 }) })),
+    'output stream 1 (audio) has 212101 packets, source has 212102');
+  assert.match(verifyOutput(okOutput({ outCounts: withOut(0, { packets: 108596 }) })), /108596 packets, source has 108595/);
 });
 
 test('verifyOutput: sub-1s truncation is caught by packet counts even when the duration is in tolerance', () => {
-  const short = withStream(0, { nb_read_packets: '108570' });
-  assert.match(verifyOutput(okOutput({ outStreams: short, outDuration: 99.2 })), /output stream 0 \(video\) has 108570 packets/);
+  assert.match(verifyOutput(okOutput({ outCounts: withOut(0, { packets: 108570 }), outDuration: 99.2 })), /output stream 0 \(video\) has 108570 packets/);
 });
 
-// Source: video, audio, dropped HDMV (2), kept SRT (3), converted WebVTT (4). Output positions 0..3.
+// Source: video, audio, dropped HDMV (2), kept ASS (3), converted WebVTT (4). Output positions 0..3.
 const mixedTracks = [
   { id: 0, type: 'video', properties: { codec_id: 'V_MPEG4/ISO/AVC' } },
   { id: 1, type: 'audio', properties: { codec_id: 'A_AAC' } },
   { id: 2, type: 'subtitles', properties: { codec_id: 'S_HDMV/TEXTST' } },
-  { id: 3, type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } },
+  { id: 3, type: 'subtitles', properties: { codec_id: 'S_TEXT/ASS' } },
   { id: 4, type: 'subtitles', properties: { codec_id: 'S_TEXT/WEBVTT' } },
 ];
 const mixed = (outSubPackets) => {
   const built = buildMerge('/in/m.mkv', '/out/m.mkv', mixedTracks, planTracks(mixedTracks, [2, 4]), { 4: '/w/track4.srt' });
   return {
     layout: built.layout,
-    outTracks: [mixedTracks[0], mixedTracks[1], mixedTracks[3], { type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } }],
+    outTracks: [mixedTracks[0], mixedTracks[1], mixedTracks[3], { type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8', language: 'und', language_ietf: 'und', default_track: false, forced_track: false } }],
     outStreams: [
-      { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '250' },
-      { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '432' },
-      { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: outSubPackets },
-      { index: 3, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '4' },
-      { index: 4, codec_type: 'attachment', nb_read_packets: '0' },
+      { index: 0, codec_type: 'video', codec_name: 'h264' },
+      { index: 1, codec_type: 'audio', codec_name: 'aac' },
+      { index: 2, codec_type: 'subtitle', codec_name: 'ass' },
+      { index: 3, codec_type: 'subtitle', codec_name: 'subrip' },
+      { index: 4, codec_type: 'attachment' },
     ],
-    inPackets: { 0: '250', 1: '432', 2: '0', 3: '17', 4: '5' },
+    srcCounts: { 0: { packets: 250 }, 1: { packets: 432 }, 3: { packets: 17 } },
+    outCounts: { 0: { packets: 250 }, 1: { packets: 432 }, 2: { packets: outSubPackets }, 3: { packets: 4 } },
     expectedPackets: { 4: 4 },
+    extractedEntries: {},
     inDuration: 120,
     outDuration: 10.03,
     lossy: true,
   };
 };
 
-test('verifyOutput: kept readable subtitle is compared with its own source stream via the layout', () => {
-  assert.strictEqual(verifyOutput(mixed('17')), null);
-  assert.strictEqual(verifyOutput(mixed('16')), 'output stream 2 (subtitle) has 16 packets, source has 17');
+test('verifyOutput: kept readable subtitle (ASS: kept 1:1) is compared with its own source stream via the layout', () => {
+  assert.strictEqual(verifyOutput(mixed(17)), null);
+  assert.strictEqual(verifyOutput(mixed(16)), 'output stream 2 (subtitle) has 16 packets, source has 17');
 });
 
-test('verifyOutput: a kept stream ffprobe did not report, or a source count that is missing, fails', () => {
-  const v = okOutput({ outStreams: [outStreamsGB[1], outStreamsGB[2]] });
-  assert.match(verifyOutput(v), /output stream 0 \(video\) has no packet count/);
-  assert.match(verifyOutput(okOutput({ inPackets: { 1: '212102', 2: '285' } })), /source stream 0 has no packet count/);
-  assert.match(verifyOutput(okOutput({ inPackets: { 0: 'garbage', 1: '212102', 2: '285' } })), /source stream 0 has no packet count/);
-  // N/A is never taken as a number (the plugin resolves it by listing the stream's packets first).
-  assert.match(verifyOutput(okOutput({ inPackets: { 0: 'N/A', 1: '212102', 2: '285' } })), /source stream 0 has no packet count/);
-  assert.match(verifyOutput(okOutput({
-    inPackets: { 0: '108595', 1: 'N/A', 2: '285' }, outStreams: withStream(1, { nb_read_packets: 'N/A' }),
-  })), /output stream 1 \(audio\) has no packet count/);
+// Kept FFmpeg-muxed SRT (the reviewer's reproducer): 4 source packets, mkvmerge keeps 3.
+const keptSrtTracks = goodBoyTracks.concat([{ id: 3, type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } }]);
+const keptSrt = (over) => {
+  const built = buildMerge('/in/k.mkv', '/out/k.mkv', keptSrtTracks, planTracks(keptSrtTracks, [2]), { 2: '/w/track2.srt' });
+  return okOutput(Object.assign({
+    layout: built.layout,
+    outTracks: [outTracksGB[0], outTracksGB[1], outTracksGB[2], { type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } }],
+    outStreams: outStreamsGB.slice(0, 2).concat([
+      { index: 2, codec_type: 'subtitle', codec_name: 'subrip' }, { index: 3, codec_type: 'subtitle', codec_name: 'subrip' }]),
+    srcCounts: { 0: { packets: 108595 }, 1: { packets: 212102 }, 3: { packets: 4 } },
+    outCounts: { 0: { packets: 108595 }, 1: { packets: 212102 }, 2: { packets: 285 }, 3: { packets: 3 } },
+    expectedPackets: { 2: 285, 3: 3 },
+    extractedEntries: { 3: 4 },
+  }, over));
+};
+
+test('verifyOutput: kept SRT with a blank block passes with the count mkvmerge keeps', () => {
+  assert.strictEqual(verifyOutput(keptSrt({})), null);
+});
+
+test('verifyOutput: kept SRT fails on any other count, or when the extraction is incomplete', () => {
+  const v = keptSrt({});
+  assert.strictEqual(verifyOutput(keptSrt({ outCounts: Object.assign({}, v.outCounts, { 3: { packets: 4 } }) })),
+    'output stream 3 (subtitle) has 4 packets, expected 3 (source 4, minus the blank blocks mkvmerge drops)');
+  assert.match(verifyOutput(keptSrt({ outCounts: Object.assign({}, v.outCounts, { 3: { packets: 2 } }) })), /has 2 packets, expected 3/);
+  assert.strictEqual(verifyOutput(keptSrt({ extractedEntries: { 3: 3 } })),
+    'extracted track 3 has 3 entries, source stream has 4 packets');
+  assert.match(verifyOutput(keptSrt({ extractedEntries: {} })), /extracted track 3 has no entry count/);
+});
+
+test('verifyOutput: a missing count on either side fails', () => {
+  assert.match(verifyOutput(okOutput({ outCounts: withOut(0, undefined) })), /output stream 0 \(video\) has no packet count/);
+  assert.match(verifyOutput(okOutput({ srcCounts: { 1: { packets: 212102 } } })), /source stream 0 has no packet count/);
+  assert.match(verifyOutput(okOutput({ srcCounts: { 0: { packets: NaN }, 1: { packets: 212102 } } })), /source stream 0 has no packet count/);
   // A resolved count of 0 on both sides (an empty kept track) passes.
-  assert.strictEqual(verifyOutput(okOutput({
-    inPackets: { 0: '108595', 1: 0, 2: '285' }, outStreams: withStream(1, { nb_read_packets: 0 }),
-  })), null);
+  assert.strictEqual(verifyOutput(okOutput({ srcCounts: { 0: { packets: 108595 }, 1: { packets: 0 } }, outCounts: withOut(1, { packets: 0 }) })), null);
 });
 
 test('packetCount: digits or numbers; N/A, missing and garbage are NaN', () => {
@@ -404,8 +516,12 @@ test('packetCount: digits or numbers; N/A, missing and garbage are NaN', () => {
 
 test('sumPacketCsv: rows of "-show_entries packet=size -of csv=p=0"', () => {
   assert.deepStrictEqual(sumPacketCsv('7680\n7680\r\n3840\n'), { packets: 3, bytes: 19200 });
+  assert.deepStrictEqual(sumPacketCsv('7680\n3840'), { packets: 2, bytes: 11520 });
   assert.deepStrictEqual(sumPacketCsv(''), { packets: 0, bytes: 0 });
+  assert.deepStrictEqual(sumPacketCsv(undefined), { packets: 0, bytes: 0 });
   assert.deepStrictEqual(sumPacketCsv('12\nN/A\n'), { packets: 2, bytes: NaN });
+  // Streams through a large listing without splitting it.
+  assert.deepStrictEqual(sumPacketCsv('1\n'.repeat(200000)), { packets: 200000, bytes: 200000 });
 });
 
 test('comparesBytes: PCM is compared by payload bytes, everything else by packets', () => {
@@ -415,10 +531,9 @@ test('comparesBytes: PCM is compared by payload bytes, everything else by packet
 
 // PCM from an FFmpeg-muxed source: mkvmerge re-packetizes (2813 -> 1500 packets), bytes are equal.
 const pcmOutput = (outBytes, over) => okOutput(Object.assign({
-  outStreams: withStream(1, { codec_name: 'pcm_s16le', nb_read_packets: '1500' }),
-  inPackets: { 0: '108595', 1: '2813', 2: '285' },
-  inBytes: { 1: 11520000 },
-  outBytes: { 1: outBytes },
+  outStreams: [outStreamsGB[0], { index: 1, codec_type: 'audio', codec_name: 'pcm_s16le' }, outStreamsGB[2]],
+  srcCounts: { 0: { packets: 108595 }, 1: { packets: 2813, bytes: 11520000 } },
+  outCounts: withOut(1, { packets: 1500, bytes: outBytes }),
 }, over));
 
 test('verifyOutput: PCM passes on equal bytes despite different packet counts', () => {
@@ -428,7 +543,7 @@ test('verifyOutput: PCM passes on equal bytes despite different packet counts', 
 test('verifyOutput: PCM short by one byte, or with bytes not measured, fails', () => {
   assert.strictEqual(verifyOutput(pcmOutput(11519999)), 'output stream 1 (audio, pcm_s16le) has 11519999 bytes, source has 11520000');
   assert.match(verifyOutput(pcmOutput(undefined)), /output stream 1 \(audio, pcm_s16le\) has no byte count/);
-  assert.match(verifyOutput(pcmOutput(11520000, { inBytes: {} })), /source stream 1 has no byte count/);
+  assert.match(verifyOutput(pcmOutput(11520000, { srcCounts: { 0: { packets: 108595 }, 1: { packets: 2813 } } })), /source stream 1 has no byte count/);
 });
 
 test('verifyOutput: strict +-1s duration when nothing was lost; input duration is required', () => {
@@ -439,24 +554,32 @@ test('verifyOutput: strict +-1s duration when nothing was lost; input duration i
 });
 
 test('verifyOutput: a dropped track that ran longest may shorten the output, but never lengthen it', () => {
-  // Input 120s only because a dropped subtitle track ran to 120s; video/audio end at 100s.
   assert.strictEqual(verifyOutput(okOutput({ inDuration: 120, outDuration: 100.04, lossy: true })), null);
   assert.match(verifyOutput(okOutput({ inDuration: 120, outDuration: 122, lossy: true })), /longer than the input/);
-  // The drop-only mixed layout: 120s input, 10.03s output, every kept packet present.
-  assert.strictEqual(verifyOutput(mixed('17')), null);
+  assert.strictEqual(verifyOutput(mixed(17)), null);
 });
 
-test('pickFfprobe: bundled, then next to an absolute ffmpegPath, then PATH', () => {
+test('pickFfprobe: posix paths: bundled, then next to an absolute ffmpegPath, then PATH', () => {
+  const p = path.posix;
   const bundled = '/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe';
-  const nextTo = path.join('/opt/ff', 'ffprobe');
-  assert.strictEqual(pickFfprobe('/opt/ff/ffmpeg', () => true), bundled);
-  assert.strictEqual(pickFfprobe('/opt/ff/ffmpeg', (p) => p === nextTo), nextTo);
-  assert.strictEqual(pickFfprobe('/opt/ff/ffmpeg', () => false), 'ffprobe');
-  assert.strictEqual(pickFfprobe('tdarr-ffmpeg', (p) => p === nextTo), 'ffprobe');
-  assert.strictEqual(pickFfprobe(undefined, () => false), 'ffprobe');
-  const win = path.join('C:\\ff', 'ffprobe.exe');
-  assert.strictEqual(pickFfprobe('C:\\ff\\ffmpeg.exe', (p) => p === win), path.isAbsolute('C:\\ff\\ffmpeg.exe') ? win : 'ffprobe');
+  assert.strictEqual(pickFfprobe('/opt/ff/ffmpeg', () => true, p), bundled);
+  assert.strictEqual(pickFfprobe('/opt/ff/ffmpeg', (x) => x === '/opt/ff/ffprobe', p), '/opt/ff/ffprobe');
+  assert.strictEqual(pickFfprobe('/opt/ff/ffmpeg', () => false, p), 'ffprobe');
+  assert.strictEqual(pickFfprobe('tdarr-ffmpeg', (x) => x === '/opt/ff/ffprobe', p), 'ffprobe');
+  assert.strictEqual(pickFfprobe(undefined, () => false, p), 'ffprobe');
 });
+
+test('pickFfprobe: windows paths: ffprobe.exe next to an absolute ffmpeg.exe', () => {
+  const w = path.win32;
+  const seen = [];
+  const exists = (x) => { seen.push(x); return x === 'C:\\ff\\ffprobe.exe'; };
+  assert.strictEqual(pickFfprobe('C:\\ff\\ffmpeg.exe', exists, w), 'C:\\ff\\ffprobe.exe');
+  assert.deepStrictEqual(seen, ['/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe', 'C:\\ff\\ffprobe.exe']);
+  assert.strictEqual(pickFfprobe('ffmpeg.exe', () => true, w), '/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe');
+  assert.strictEqual(pickFfprobe('ffmpeg.exe', () => false, w), 'ffprobe');
+});
+
+// --- the plugin, with stubbed fs / child_process ---
 
 const call = (file, otherArguments) => pluginModule.plugin(file, {}, {}, otherArguments);
 
@@ -490,123 +613,38 @@ test('plugin: skips when the output path equals the input path', () => {
   assert.match(res.infoLog, /Output path equals input path/);
 });
 
-test('plugin: mkvmerge killed by a signal fails the job, keeps the input and cleans up', () => {
-  const calls = [];
-  const unlinked = [];
-  const files = {};
-  files[path.join('/w', 'track2.vtt')] = vtt4;
-  files[path.join('/w', 'track2.srt')] = srt4;
-  const fakeFs = {
-    existsSync: () => true,
-    unlinkSync: (p) => { unlinked.push(p); },
-    readFileSync: (p) => {
-      if (!(p in files)) throw new Error('unexpected read ' + p);
-      return files[p];
-    },
-  };
-  const fakeCp = {
-    spawnSync: (cmd, args) => {
-      calls.push([cmd].concat(args));
-      if (cmd === 'mkvmerge' && args[0] === '-J') return { status: 0, stdout: JSON.stringify({ tracks: goodBoyTracks }) };
-      if (cmd === 'mkvmerge') return { status: null, signal: 'SIGKILL', stdout: '', stderr: '' };
-      return { status: 0, stdout: '', stderr: '' };
-    },
-  };
-  stubs = { fs: fakeFs, child_process: fakeCp };
-  let res;
-  try {
-    res = call(
-      { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: goodBoyStreams, format: { duration: '100' } } },
-      { cacheFilePath: '/w/out.mkv', ffmpegPath: 'tdarr-ffmpeg', mkvpropeditPath: 'mkvpropedit' },
-    );
-  } finally {
-    stubs = null;
-  }
-  assert.match(res.error, /mkvmerge failed/);
-  assert.strictEqual(res.file._id, '/m/a.mkv');
-  assert.ok(calls.some((c) => c[0] === 'mkvextract'), 'extracted');
-  assert.ok(calls.some((c) => c[0] === 'tdarr-ffmpeg'), 'converted');
-  assert.deepStrictEqual(unlinked.slice().sort(), [path.join('/w', 'track2.srt'), path.join('/w', 'track2.vtt'), '/w/out.mkv'].sort());
-});
+const W = (name) => path.join('/w', name);
 
-const runStubbed = (vttText) => {
-  const calls = [];
-  const vtt = path.join('/w', 'track2.vtt');
-  stubs = {
-    fs: {
-      existsSync: (p) => (p === vtt ? vttText !== null : true),
-      unlinkSync: () => {},
-      readFileSync: (p) => {
-        if (p !== vtt || vttText === null) throw new Error('unexpected read ' + p);
-        return vttText;
-      },
-    },
-    child_process: {
-      spawnSync: (cmd, args) => {
-        calls.push(cmd);
-        if (cmd === 'mkvmerge' && args[0] === '-J') return { status: 0, stdout: JSON.stringify({ tracks: goodBoyTracks }) };
-        if (cmd === 'mkvmerge') return { status: 2, stdout: 'stop here' };
-        return { status: 0, stdout: '', stderr: '' };
-      },
-    },
-  };
-  try {
-    const res = call(
-      { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: goodBoyStreams, format: { duration: '100' } } },
-      { cacheFilePath: '/w/out.mkv', ffmpegPath: 'tdarr-ffmpeg', mkvpropeditPath: 'mkvpropedit' },
-    );
-    return { res, calls };
-  } finally {
-    stubs = null;
-  }
-};
-
-test('plugin: a WebVTT file mkvextract did not write fails the job instead of dropping the track', () => {
-  const { res, calls } = runStubbed(null);
-  assert.match(res.error, /extracted track 2 is missing/);
-  assert.strictEqual(res.file._id, '/m/a.mkv');
-  assert.ok(!calls.includes('tdarr-ffmpeg'));
-});
-
-test('plugin: an extracted file without the WEBVTT signature fails the job', () => {
-  const { res } = runStubbed('garbage\n00:00:01.000 --> 00:00:02.000\nHello\n');
-  assert.match(res.error, /extracted track 2 is not a WebVTT file/);
-});
-
-test('plugin: a valid WebVTT file with no text cues is dropped (mkvmerge runs without it)', () => {
-  const { res } = runStubbed('\uFEFFWEBVTT\n');
-  assert.match(res.infoLog, /WebVTT track 2 has no cues with text \(0 cues\), dropping it/);
-  assert.match(res.error, /mkvmerge failed/); // the stub stops the run at the mux
-});
-
-// A full stubbed run: extract, convert, mux, then the verification probes.
-// opts.inFormat replaces Tdarr's format probe data; opts.durationProbe is what the stubbed
-// ffprobe prints for "-show_entries format=duration" (stdout text). opts.inAudio / opts.outAudio
-// override the audio stream's count entries; opts.listings maps "<file>#<stream>" to the stubbed
-// "-show_entries packet=size" output.
-const runFull = (outVideoPackets, opts) => {
-  const o = opts || {};
-  const calls = [];
-  const unlinked = [];
-  const files = {};
-  files[path.join('/w', 'track2.vtt')] = vtt4;
-  files[path.join('/w', 'track2.srt')] = srt4;
-  const inCounts = { streams: [{ index: 0, nb_read_packets: '2500' }, Object.assign({ index: 1, nb_read_packets: '4300' }, o.inAudio), { index: 2, nb_read_packets: '4' }] };
-  const outProbe = {
-    streams: [
-      { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: outVideoPackets },
-      Object.assign({ index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' }, o.outAudio),
+// A stubbed run. Defaults are the Good Boy case (video, audio, WebVTT track 2 -> SRT); cfg overrides:
+// srcStreams (Tdarr probe data), srcTracks / outTracks (mkvmerge -J), inCounts / outStreams (ffprobe
+// -count_packets rows), outDuration, inFormat, durationProbe (stdout for "format=duration"),
+// listings ("<file>#<stream>" -> "packet=size" stdout), files (path -> text; null = missing),
+// merge (the mkvmerge mux result).
+const run = (cfg) => {
+  const c = Object.assign({
+    srcStreams: goodBoyStreams,
+    srcTracks: goodBoyTracks,
+    outTracks: [outTracksGB[0], outTracksGB[1], { id: 2, type: 'subtitles', properties: srtOut }],
+    inCounts: [{ index: 0, nb_read_packets: '2500' }, { index: 1, nb_read_packets: '4300' }],
+    outStreams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2500' },
+      { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' },
       { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '2' },
-    ].map((x) => JSON.parse(JSON.stringify(x))),
-    format: { duration: '100.2' },
-  };
-  const outTracks = goodBoyTracks.slice(0, 2).concat([{ id: 2, type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } }]);
+    ],
+    outDuration: '100.2',
+    inFormat: { duration: '100' },
+    listings: {},
+    merge: { status: 0, stdout: '', stderr: '' },
+  }, cfg);
+  const files = Object.assign({}, { [W('track2.vtt')]: vtt4, [W('track2.srt')]: srt4 }, c.files);
+  const calls = [];
+  const unlinked = [];
   stubs = {
     fs: {
-      existsSync: () => true,
+      existsSync: (p) => !(p in files) || files[p] !== null,
       unlinkSync: (p) => { unlinked.push(p); },
       readFileSync: (p) => {
-        if (!(p in files)) throw new Error('unexpected read ' + p);
+        if (!(p in files) || files[p] === null) throw new Error('unexpected read ' + p);
         return files[p];
       },
     },
@@ -614,16 +652,18 @@ const runFull = (outVideoPackets, opts) => {
       spawnSync: (cmd, args) => {
         calls.push([cmd].concat(args));
         if (cmd === 'mkvmerge' && args[0] === '-J') {
-          return { status: 0, stdout: JSON.stringify({ tracks: args[1] === '/w/out.mkv' ? outTracks : goodBoyTracks }) };
+          return { status: 0, stdout: JSON.stringify({ tracks: args[1] === '/w/out.mkv' ? c.outTracks : c.srcTracks }) };
         }
+        if (cmd === 'mkvmerge') return c.merge;
         if (/ffprobe$/.test(cmd)) {
-          if (args.includes('format=duration')) return { status: 0, stdout: o.durationProbe };
+          if (args.includes('format=duration')) return { status: 0, stdout: c.durationProbe };
           if (args.includes('packet=size')) {
             const key = args[args.length - 1] + '#' + args[args.indexOf('-select_streams') + 1];
-            if (!o.listings || !(key in o.listings)) throw new Error('unexpected listing ' + key);
-            return { status: 0, stdout: o.listings[key] };
+            if (!(key in c.listings)) throw new Error('unexpected listing ' + key);
+            return { status: 0, stdout: c.listings[key] };
           }
-          return { status: 0, stdout: JSON.stringify(args[args.length - 1] === '/w/out.mkv' ? outProbe : inCounts) };
+          const out = args[args.length - 1] === '/w/out.mkv';
+          return { status: 0, stdout: JSON.stringify(out ? { streams: c.outStreams, format: { duration: c.outDuration } } : { streams: c.inCounts }) };
         }
         return { status: 0, stdout: '', stderr: '' };
       },
@@ -631,7 +671,7 @@ const runFull = (outVideoPackets, opts) => {
   };
   try {
     const res = call(
-      { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: goodBoyStreams, format: o.inFormat || { duration: '100' } } },
+      { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: c.srcStreams, format: c.inFormat } },
       { cacheFilePath: '/w/out.mkv', ffmpegPath: 'tdarr-ffmpeg', mkvpropeditPath: 'mkvpropedit' },
     );
     return { res, calls, unlinked };
@@ -639,75 +679,225 @@ const runFull = (outVideoPackets, opts) => {
     stubs = null;
   }
 };
+const cmds = (calls, name) => calls.filter((x) => x[0] === name || (name === 'ffprobe' && /ffprobe$/.test(x[0])));
+const listingCalls = (calls) => calls.filter((x) => x.includes('packet=size'))
+  .map((x) => x[x.length - 1] + '#' + x[x.indexOf('-select_streams') + 1]).sort();
 
-test('plugin: verifies kept tracks by packet counts against the source and hands on the output', () => {
-  const { res, calls, unlinked } = runFull('2500');
+test('plugin: verifies kept tracks by packet counts, hands on the output and removes its temp files', () => {
+  const { res, calls, unlinked } = run({});
   assert.strictEqual(res.error, undefined, res.infoLog);
   assert.strictEqual(res.file._id, '/w/out.mkv');
-  const probes = calls.filter((c) => /ffprobe$/.test(c[0]));
-  assert.deepStrictEqual(probes.map((c) => c[c.length - 1]), ['/m/a.mkv', '/w/out.mkv']);
-  probes.forEach((c) => assert.ok(c.includes('-count_packets'), c.join(' ')));
+  const probes = cmds(calls, 'ffprobe');
+  assert.deepStrictEqual(probes.map((x) => x[x.length - 1]), ['/m/a.mkv', '/w/out.mkv']);
+  probes.forEach((x) => assert.ok(x.includes('-count_packets'), x.join(' ')));
   assert.ok(!probes[1].includes('-select_streams'), 'output pass covers every stream');
-  assert.match(res.infoLog, /0 \(video\) 2500, 1 \(audio\) 4300/);
-  assert.ok(!unlinked.includes('/w/out.mkv'));
-  assert.ok(!calls.some((c) => c.includes('packet=size')), 'no packet listing when every count is known');
+  assert.match(res.infoLog, /kept streams match the source exactly \(packets, or bytes for PCM\): 0 \(video\) 2500, 1 \(audio\) 4300\./);
+  assert.deepStrictEqual(listingCalls(calls), []);
+  assert.deepStrictEqual(unlinked.slice().sort(), [W('track2.srt'), W('track2.vtt')].sort());
 });
 
-const listingCalls = (calls) => calls.filter((c) => c.includes('packet=size'))
-  .map((c) => c[c.length - 1] + '#' + c[c.indexOf('-select_streams') + 1]).sort();
+test('plugin: converted-cue log separates left-out cues from invisible entries that are kept', () => {
+  // vtt4: 4 cues; SRT keeps 2 with text; nothing invisible is muxed.
+  assert.match(run({}).res.infoLog, /Converted WebVTT track 2 \(en\) to SRT: 2 cues with text, 2 left out \(empty or blank\)\./);
+  const vtt = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n\n00:00:03.000 --> 00:00:04.000\n<i> </i>\n\n00:00:05.000 --> 00:00:06.000\n\n';
+  const srt = '1\n00:00:01,000 --> 00:00:02,000\nHi\n\n2\n00:00:03,000 --> 00:00:04,000\n<i> </i>\n\n';
+  const outStreams = [
+    { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2500' },
+    { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' },
+    { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '2' },
+  ];
+  const { res } = run({ files: { [W('track2.vtt')]: vtt, [W('track2.srt')]: srt }, outStreams });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.match(res.infoLog, /to SRT: 1 cues with text, 1 left out \(empty or blank\), 1 kept as an invisible entry\./);
+});
+
+test('plugin: mkvmerge exit 1 (warnings) passes and logs the warning', () => {
+  const { res } = run({ merge: { status: 1, stdout: 'Warning: something odd', stderr: '' } });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.match(res.infoLog, /mkvmerge warnings: Warning: something odd/);
+  assert.strictEqual(res.file._id, '/w/out.mkv');
+});
+
+test('plugin: drop-only plan: no extraction, the track is removed, a shorter output is allowed', () => {
+  const srcTracks = goodBoyTracks.slice(0, 2).concat([{ id: 2, type: 'subtitles', properties: { codec_id: 'S_HDMV/TEXTST' } }]);
+  const { res, calls } = run({
+    srcTracks,
+    inFormat: { duration: '120' },
+    outTracks: [outTracksGB[0], outTracksGB[1]],
+    outStreams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2500' },
+      { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' },
+    ],
+  });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.deepStrictEqual(cmds(calls, 'mkvextract'), []);
+  const merge = cmds(calls, 'mkvmerge').find((x) => x[1] === '-o');
+  assert.deepStrictEqual(merge.slice(1), ['-o', '/w/out.mkv', '--subtitle-tracks', '!2', '/m/a.mkv', '--track-order', '0:0,0:1']);
+  assert.match(res.infoLog, /Subtitle track 2 \(S_HDMV\/TEXTST\) is unreadable and not convertible, dropping it/);
+});
+
+// Good Boy plus a kept, FFmpeg-muxed SRT track 3 with a "   " block (the reviewer's reproducer).
+const keptCfg = (outKeptPackets, extracted) => ({
+  srcStreams: goodBoyStreams.concat([{ index: 3, codec_type: 'subtitle', codec_name: 'subrip' }]),
+  srcTracks: keptSrtTracks,
+  inCounts: [{ index: 0, nb_read_packets: '2500' }, { index: 1, nb_read_packets: '4300' }, { index: 3, nb_read_packets: '4' }],
+  outTracks: [outTracksGB[0], outTracksGB[1], { id: 2, type: 'subtitles', properties: srtOut }, { id: 3, type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } }],
+  outStreams: [
+    { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2500' },
+    { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' },
+    { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '2' },
+    { index: 3, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: outKeptPackets },
+  ],
+  files: { [W('kept3.srt')]: extracted === undefined ? keptSrt4 : extracted },
+});
+
+test('plugin: kept SRT with a blank block: extracted in the same mkvextract call, expected count is 3', () => {
+  const { res, calls, unlinked } = run(keptCfg('3'));
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  const ex = cmds(calls, 'mkvextract');
+  assert.strictEqual(ex.length, 1);
+  assert.deepStrictEqual(ex[0].slice(1), ['/m/a.mkv', 'tracks', '2:' + W('track2.vtt'), '3:' + W('kept3.srt')]);
+  assert.match(res.infoLog, /3 \(subtitle\) 3 of 4 \(1 blank block dropped by mkvmerge\)/);
+  assert.ok(unlinked.includes(W('kept3.srt')));
+});
+
+test('plugin: kept SRT with the wrong output count, or an incomplete extraction, fails', () => {
+  assert.match(run(keptCfg('4')).res.error, /output stream 3 \(subtitle\) has 4 packets, expected 3/);
+  const short = keptSrt4.slice(0, keptSrt4.indexOf('4\n00:00:07'));
+  assert.match(run(keptCfg('3', short)).res.error, /extracted track 3 has 3 entries, source stream has 4 packets/);
+  assert.match(run(keptCfg('3', null)).res.error, /extracted track 3 is missing/);
+});
+
+test('plugin: drop-only plan with a kept SRT still extracts just that track', () => {
+  const srcTracks = goodBoyTracks.slice(0, 2).concat([
+    { id: 2, type: 'subtitles', properties: { codec_id: 'S_HDMV/TEXTST' } },
+    { id: 3, type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } }]);
+  const { res, calls } = run({
+    srcTracks,
+    srcStreams: goodBoyStreams.concat([{ index: 3, codec_type: 'subtitle', codec_name: 'subrip' }]),
+    inCounts: [{ index: 0, nb_read_packets: '2500' }, { index: 1, nb_read_packets: '4300' }, { index: 3, nb_read_packets: '4' }],
+    outTracks: [outTracksGB[0], outTracksGB[1], { id: 2, type: 'subtitles', properties: { codec_id: 'S_TEXT/UTF8' } }],
+    outStreams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2500' },
+      { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' },
+      { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '3' },
+    ],
+    files: { [W('kept3.srt')]: keptSrt4 },
+  });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.deepStrictEqual(cmds(calls, 'mkvextract').map((x) => x.slice(1)), [['/m/a.mkv', 'tracks', '3:' + W('kept3.srt')]]);
+});
+
+test('plugin: converted track metadata that differs in the output fails the job', () => {
+  const { res } = run({ outTracks: [outTracksGB[0], outTracksGB[1], { id: 2, type: 'subtitles', properties: Object.assign({}, srtOut, { forced_track: true }) }] });
+  assert.match(res.error, /output track 2 forced_track is true, source has false/);
+});
+
+test('plugin: ffprobe and mkvmerge disagreeing on the track layout fails before anything runs', () => {
+  const { res, calls } = run({ srcTracks: goodBoyTracks.slice(0, 2).concat([goodBoyTracks[2], { id: 3, type: 'audio', properties: { codec_id: 'A_AAC' } }]) });
+  assert.match(res.error, /ffprobe sees 3 tracks, mkvmerge 4/);
+  assert.deepStrictEqual(cmds(calls, 'mkvextract'), []);
+});
+
+test('plugin: mkvmerge killed by a signal fails the job, keeps the input and cleans up', () => {
+  const { res, calls, unlinked } = run({ merge: { status: null, signal: 'SIGKILL', stdout: '', stderr: '' } });
+  assert.match(res.error, /mkvmerge failed \(signal SIGKILL\)/);
+  assert.strictEqual(res.file._id, '/m/a.mkv');
+  assert.ok(cmds(calls, 'mkvextract').length === 1, 'extracted');
+  assert.ok(cmds(calls, 'tdarr-ffmpeg').length === 1, 'converted');
+  assert.deepStrictEqual(unlinked.slice().sort(), [W('track2.srt'), W('track2.vtt'), '/w/out.mkv'].sort());
+});
+
+test('plugin: a WebVTT file mkvextract did not write fails the job instead of dropping the track', () => {
+  const { res, calls } = run({ files: { [W('track2.vtt')]: null } });
+  assert.match(res.error, /extracted track 2 is missing/);
+  assert.strictEqual(res.file._id, '/m/a.mkv');
+  assert.deepStrictEqual(cmds(calls, 'tdarr-ffmpeg'), []);
+});
+
+test('plugin: an extracted file without the WEBVTT signature fails the job', () => {
+  const { res } = run({ files: { [W('track2.vtt')]: 'garbage\n00:00:01.000 --> 00:00:02.000\nHello\n' } });
+  assert.match(res.error, /extracted track 2 is not a WebVTT file/);
+});
+
+test('plugin: a valid WebVTT file with no text cues is dropped (mkvmerge runs without it)', () => {
+  const { res } = run({ files: { [W('track2.vtt')]: '\uFEFFWEBVTT\n' }, merge: { status: 2, stdout: 'stop here' } });
+  assert.match(res.infoLog, /WebVTT track 2 has no cues with text \(0 cues\), dropping it/);
+  assert.match(res.error, /mkvmerge failed/);
+});
 
 test('plugin: PCM is verified by payload bytes listed on both files', () => {
   const pcm = {
-    inAudio: { nb_read_packets: '2813' },
-    outAudio: { codec_name: 'pcm_s16le', nb_read_packets: '1500' },
+    inCounts: [{ index: 0, nb_read_packets: '2500' }, { index: 1, nb_read_packets: '2813' }],
+    outStreams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2500' },
+      { index: 1, codec_type: 'audio', codec_name: 'pcm_s16le', nb_read_packets: '1500' },
+      { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '2' },
+    ],
     listings: { '/m/a.mkv#1': '4000\n4000\n4000\n', '/w/out.mkv#1': '6000\n6000\n' },
   };
-  const { res, calls } = runFull('2500', pcm);
+  const { res, calls } = run(pcm);
   assert.strictEqual(res.error, undefined, res.infoLog);
   assert.deepStrictEqual(listingCalls(calls), ['/m/a.mkv#1', '/w/out.mkv#1']);
-  assert.match(res.infoLog, /kept streams match the source exactly \(packets, or bytes for PCM\): 0 \(video\) 2500, 1 \(audio\) 12000 bytes\./);
-  const short = runFull('2500', Object.assign({}, pcm, { listings: { '/m/a.mkv#1': '4000\n4000\n4000\n', '/w/out.mkv#1': '6000\n5999\n' } }));
+  assert.match(res.infoLog, /: 0 \(video\) 2500, 1 \(audio\) 12000 bytes\./);
+  const short = run(Object.assign({}, pcm, { listings: { '/m/a.mkv#1': '4000\n4000\n4000\n', '/w/out.mkv#1': '6000\n5999\n' } }));
   assert.match(short.res.error, /output stream 1 \(audio, pcm_s16le\) has 11999 bytes, source has 12000/);
 });
 
 test('plugin: an unknown (N/A) packet count is resolved by listing that stream, exactly', () => {
+  const outStreams = (audioPackets) => [
+    { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2500' },
+    { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: audioPackets },
+    { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '2' },
+  ];
   // ffprobe leaves nb_read_packets out of JSON for a stream with no packets.
-  const empty = { inAudio: { nb_read_packets: undefined }, outAudio: { nb_read_packets: undefined }, listings: { '/m/a.mkv#1': '', '/w/out.mkv#1': '' } };
-  const { res, calls } = runFull('2500', empty);
+  const { res, calls } = run({
+    inCounts: [{ index: 0, nb_read_packets: '2500' }, { index: 1 }],
+    outStreams: outStreams(undefined),
+    listings: { '/m/a.mkv#1': '', '/w/out.mkv#1': '' },
+  });
   assert.strictEqual(res.error, undefined, res.infoLog);
   assert.deepStrictEqual(listingCalls(calls), ['/m/a.mkv#1', '/w/out.mkv#1']);
   assert.match(res.infoLog, /1 \(audio\) 0/);
-  // Source unknown and really 3 packets; output counted 2: fails.
-  const lost = runFull('2500', { inAudio: { nb_read_packets: 'N/A' }, outAudio: { nb_read_packets: '2' }, listings: { '/m/a.mkv#1': '9\n9\n9\n' } });
+  const lost = run({
+    inCounts: [{ index: 0, nb_read_packets: '2500' }, { index: 1, nb_read_packets: 'N/A' }],
+    outStreams: outStreams('2'),
+    listings: { '/m/a.mkv#1': '9\n9\n9\n' },
+  });
   assert.match(lost.res.error, /output stream 1 \(audio\) has 2 packets, source has 3/);
 });
 
 test('plugin: a kept stream short by one packet fails the job and removes the output', () => {
-  const { res, unlinked } = runFull('2499');
+  const { res, unlinked } = run({
+    outStreams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', nb_read_packets: '2499' },
+      { index: 1, codec_type: 'audio', codec_name: 'aac', nb_read_packets: '4300' },
+      { index: 2, codec_type: 'subtitle', codec_name: 'subrip', nb_read_packets: '2' },
+    ],
+  });
   assert.match(res.error, /output stream 0 \(video\) has 2499 packets, source has 2500/);
   assert.strictEqual(res.file._id, '/m/a.mkv');
   assert.ok(unlinked.includes('/w/out.mkv'));
 });
 
-const durationProbes = (calls) => calls.filter((c) => /ffprobe$/.test(c[0]) && c.includes('format=duration'));
+const durationProbes = (calls) => calls.filter((x) => /ffprobe$/.test(x[0]) && x.includes('format=duration'));
 
 test('plugin: no duration in the probe data: measures it with ffprobe and uses the result', () => {
-  const { res, calls } = runFull('2500', { inFormat: {}, durationProbe: JSON.stringify({ format: { duration: '100.000000' } }) });
+  const { res, calls } = run({ inFormat: {}, durationProbe: JSON.stringify({ format: { duration: '100.000000' } }) });
   assert.strictEqual(res.error, undefined, res.infoLog);
   const d = durationProbes(calls);
   assert.strictEqual(d.length, 1);
   assert.strictEqual(d[0][d[0].length - 1], '/m/a.mkv');
-  // The measured value is the one checked: a measured 50s makes the 100.2s output too long.
-  const short = runFull('2500', { inFormat: { duration: '0' }, durationProbe: JSON.stringify({ format: { duration: '50' } }) });
+  const short = run({ inFormat: { duration: '0' }, durationProbe: JSON.stringify({ format: { duration: '50' } }) });
   assert.match(short.res.error, /output is longer than the input: 100.2s vs 50s/);
 });
 
 test('plugin: no duration in the probe data and ffprobe returns nothing: the job fails before muxing', () => {
   ['', '{}', JSON.stringify({ format: {} }), JSON.stringify({ format: { duration: 'N/A' } })].forEach((out) => {
-    const { res, calls } = runFull('2500', { inFormat: {}, durationProbe: out });
+    const { res, calls } = run({ inFormat: {}, durationProbe: out });
     assert.match(res.error, /could not measure the input duration/, JSON.stringify(out));
     assert.strictEqual(res.file._id, '/m/a.mkv');
-    assert.ok(!calls.some((c) => c[0] === 'mkvextract'), 'stopped before extracting');
+    assert.deepStrictEqual(cmds(calls, 'mkvextract'), []);
   });
 });
 
@@ -715,7 +905,9 @@ test('details: id matches the filename', () => {
   assert.strictEqual(pluginModule.details().id, 'Tdarr_Plugin_the1nk_convert_unsupported_subs');
 });
 
-test('details: description names the PCM byte check', () => {
-  assert.match(pluginModule.details().Description,
-    /exact packet count for every kept track except PCM, which is checked by exact payload bytes/);
+test('details: description names the exact checks', () => {
+  const d = pluginModule.details().Description;
+  assert.match(d, /exact packet count for every kept track except PCM, which is checked by exact payload bytes/);
+  assert.match(d, /blank blocks mkvmerge drops/);
+  assert.match(d, /Cues that are empty or only whitespace are left out/);
 });
