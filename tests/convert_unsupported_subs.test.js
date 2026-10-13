@@ -18,7 +18,7 @@ Module._load = function (request, parent, isMain) {
 const pluginModule = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'));
 const {
   findUnreadableSubs, planTracks, buildMerge, toolFailed, cueStats, verifyOutput, pickFfprobe,
-  vttProblem, packetCount, sumPacketCsv, comparesBytes, checkTrackMapping, filtersBlankBlocks,
+  vttProblem, packetCount, sumPacketCsv, comparesBytes, readTrackEntries, mapTracks, filtersBlankBlocks,
   parseExtractedSrt, keptTextStats,
 } = pluginModule._test;
 
@@ -53,21 +53,118 @@ test('findUnreadableSubs: missing stream list', () => {
   assert.deepStrictEqual(findUnreadableSubs(undefined), []);
 });
 
-test('checkTrackMapping: tracks line up by index and type; cover art and attachments are not tracks', () => {
-  const streams = goodBoyStreams.concat([
-    { index: 3, codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 1 } },
-    { index: 4, codec_type: 'attachment', codec_name: 'ttf' },
-  ]);
-  assert.strictEqual(checkTrackMapping(streams, goodBoyTracks), null);
+// --- Matroska Tracks header and the ffprobe <-> mkvmerge mapping ---
+
+// EBML element with an 8-byte size (legal for any element).
+const ebml = (idHex, payload) => {
+  const data = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const size = Buffer.alloc(8);
+  size[0] = 0x01;
+  size.writeUIntBE(data.length, 2, 6);
+  return Buffer.concat([Buffer.from(idHex, 'hex'), size, data]);
+};
+const TRACK_TYPE = { video: 1, audio: 2, subtitles: 0x11, buttons: 0x12, metadata: 0x21, logo: 0x10, complex: 3, control: 0x20 };
+// A Matroska file start: EBML header, Segment with SeekHead, Info, Void, Tracks (one TrackEntry per
+// {type, codec}), then a Cluster. opts.clusterFirst puts the Cluster before Tracks.
+const mkvHeader = (tracks, opts) => {
+  const o = opts || {};
+  const entries = tracks.map((t, i) => ebml('ae', Buffer.concat([
+    ebml('d7', Buffer.from([i + 1])), ebml('83', Buffer.from([TRACK_TYPE[t.type]])), ebml('86', t.codec || 'X')])));
+  const trackEl = ebml('1654ae6b', Buffer.concat(entries));
+  const cluster = ebml('1f43b675', Buffer.alloc(64));
+  const body = [ebml('114d9b74', Buffer.alloc(12)), ebml('1549a966', ebml('2ad7b1', Buffer.from([1]))), ebml('ec', Buffer.alloc(5))]
+    .concat(o.clusterFirst ? [cluster, trackEl] : [trackEl, cluster]);
+  return Buffer.concat([ebml('1a45dfa3', ebml('4282', 'matroska')), ebml('18538067', Buffer.concat(body))]);
+};
+const readerOf = (buf) => (pos, len) => buf.slice(pos, pos + len);
+const headerOf = (mkvTracks) => mkvHeader(mkvTracks.map((t) => ({ type: t.type, codec: (t.properties || {}).codec_id })));
+
+test('readTrackEntries: lists every TrackEntry in order with its type name and codec', () => {
+  const h = mkvHeader([{ type: 'video', codec: 'V_MPEG4/ISO/AVC' }, { type: 'buttons', codec: 'B_VOBBTN' }, { type: 'audio', codec: 'A_AAC' }, { type: 'metadata', codec: 'S_TEXT/UTF8' }]);
+  assert.deepStrictEqual(readTrackEntries(readerOf(h)), [
+    { type: 'video', codec: 'V_MPEG4/ISO/AVC' }, { type: 'buttons', codec: 'B_VOBBTN' },
+    { type: 'audio', codec: 'A_AAC' }, { type: 'metadata', codec: 'S_TEXT/UTF8' }]);
 });
 
-test('checkTrackMapping: a different track count or type fails', () => {
-  assert.match(checkTrackMapping(goodBoyStreams.slice(0, 2), goodBoyTracks), /ffprobe sees 2 tracks, mkvmerge 3/);
-  const swapped = [goodBoyStreams[1], goodBoyStreams[0], goodBoyStreams[2]].map((s, i) => Object.assign({}, s, { index: i }));
-  assert.match(checkTrackMapping(swapped, goodBoyTracks), /stream 0 is audio, mkvmerge track 0 is video/);
-  const offset = goodBoyStreams.map((s) => Object.assign({}, s, { index: s.index + 1 }));
-  assert.match(checkTrackMapping(offset, goodBoyTracks), /stream 1 .* mkvmerge track 0/);
-  assert.match(checkTrackMapping(undefined, goodBoyTracks), /ffprobe sees 0 tracks/);
+test('readTrackEntries: reads only element headers until Tracks (never the clusters)', () => {
+  const h = mkvHeader([{ type: 'video', codec: 'V' }]);
+  const big = Buffer.concat([h, Buffer.alloc(1000000)]);
+  let bytes = 0;
+  const entries = readTrackEntries((pos, len) => { bytes += len; return big.slice(pos, pos + len); });
+  assert.strictEqual(entries.length, 1);
+  assert.ok(bytes < 400, 'read ' + bytes + ' bytes');
+});
+
+test('readTrackEntries: fails clearly on a non-Matroska file, a Cluster before Tracks, or a truncated header', () => {
+  assert.throws(() => readTrackEntries(readerOf(Buffer.from('not a matroska file at all'))), /not a Matroska file/);
+  assert.throws(() => readTrackEntries(readerOf(mkvHeader([{ type: 'video' }], { clusterFirst: true }))), /no Tracks element before the first Cluster/);
+  const h = mkvHeader([{ type: 'video' }]);
+  assert.throws(() => readTrackEntries(readerOf(h.slice(0, 80))), /truncated|no Tracks element/);
+});
+
+test('mapTracks: Good Boy maps 1:1; cover art and attachments are ignored', () => {
+  const streams = goodBoyStreams.concat([
+    { index: 3, codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 1 } },
+    { index: 4, codec_type: 'attachment', codec_name: 'ttf' }]);
+  const m = mapTracks(readTrackEntries(readerOf(headerOf(goodBoyTracks))), streams, goodBoyTracks);
+  assert.strictEqual(m.error, undefined);
+  assert.deepStrictEqual(m.ffIndex, { 0: 0, 1: 1, 2: 2 });
+  assert.deepStrictEqual(m.mkvId, { 0: 0, 1: 1, 2: 2 });
+  assert.deepStrictEqual(m.others, []);
+});
+
+test('mapTracks: a buttons track in the middle (ffprobe renumbers, mkvmerge leaves a gap) maps by order and is reported', () => {
+  const entries = [{ type: 'video', codec: 'V_MPEG4/ISO/AVC' }, { type: 'buttons', codec: 'B_VOBBTN' }, { type: 'audio', codec: 'A_AAC' }, { type: 'subtitles', codec: 'S_TEXT/WEBVTT' }];
+  const mkv = [goodBoyTracks[0], Object.assign({}, goodBoyTracks[1], { id: 2 }), Object.assign({}, goodBoyTracks[2], { id: 3 })];
+  const m = mapTracks(entries, goodBoyStreams, mkv);
+  assert.strictEqual(m.error, undefined);
+  assert.deepStrictEqual(m.ffIndex, { 0: 0, 2: 1, 3: 2 });
+  assert.deepStrictEqual(m.mkvId, { 0: 0, 1: 2, 2: 3 });
+  assert.deepStrictEqual(m.others, [{ id: 1, type: 'buttons', codec: 'B_VOBBTN' }]);
+});
+
+test('mapTracks: a metadata track ffprobe lists without a codec_type keeps the indexes aligned and is reported', () => {
+  const entries = [{ type: 'video', codec: 'V' }, { type: 'metadata', codec: 'S_TEXT/UTF8' }, { type: 'audio', codec: 'A' }, { type: 'subtitles', codec: 'S_TEXT/WEBVTT' }];
+  const streams = [goodBoyStreams[0], { index: 1, codec_name: 'subrip' }, Object.assign({}, goodBoyStreams[1], { index: 2 }), Object.assign({}, goodBoyStreams[2], { index: 3 })];
+  const mkv = [goodBoyTracks[0], Object.assign({}, goodBoyTracks[1], { id: 2 }), Object.assign({}, goodBoyTracks[2], { id: 3 })];
+  const m = mapTracks(entries, streams, mkv);
+  assert.strictEqual(m.error, undefined);
+  assert.deepStrictEqual(m.ffIndex, { 0: 0, 2: 2, 3: 3 });
+  assert.deepStrictEqual(m.others, [{ id: 1, type: 'metadata', codec: 'S_TEXT/UTF8' }]);
+});
+
+test('mapTracks: a metadata track ffprobe lists as a subtitle stream (seen with S_TEXT/UTF8) is told apart by alignment', () => {
+  // Measured: [video, audio, metadata (S_TEXT/UTF8), WebVTT] -> ffprobe 0 video, 1 audio, 2 subtitle/subrip, 3 subtitle.
+  const entries = [{ type: 'video', codec: 'V' }, { type: 'audio', codec: 'A' }, { type: 'metadata', codec: 'S_TEXT/UTF8' }, { type: 'subtitles', codec: 'S_TEXT/WEBVTT' }];
+  const streams = [goodBoyStreams[0], goodBoyStreams[1], { index: 2, codec_type: 'subtitle', codec_name: 'subrip' }, { index: 3, codec_type: 'subtitle' }];
+  const mkv = [goodBoyTracks[0], goodBoyTracks[1], Object.assign({}, goodBoyTracks[2], { id: 3 })];
+  const m = mapTracks(entries, streams, mkv);
+  assert.strictEqual(m.error, undefined);
+  assert.deepStrictEqual(m.ffIndex, { 0: 0, 1: 1, 3: 3 });
+  assert.deepStrictEqual(m.mkvId, { 0: 0, 1: 1, 3: 3 });
+  assert.deepStrictEqual(m.others, [{ id: 2, type: 'metadata', codec: 'S_TEXT/UTF8' }]);
+});
+
+test('mapTracks: disagreements fail with a precise message', () => {
+  const entries = readTrackEntries(readerOf(headerOf(goodBoyTracks)));
+  assert.match(mapTracks(entries, goodBoyStreams, goodBoyTracks.slice(0, 2)).error,
+    /mkvmerge lists 2 tracks, the file header has 3 video, audio and subtitle tracks/);
+  assert.match(mapTracks(entries, goodBoyStreams.slice(0, 2), goodBoyTracks).error,
+    /ffprobe streams \[0 video, 1 audio\] cannot be matched to the file's tracks \[video, audio, subtitles\]/);
+  const swapped = [goodBoyStreams[1], goodBoyStreams[0], goodBoyStreams[2]].map((x, i) => Object.assign({}, x, { index: i }));
+  assert.match(mapTracks(entries, swapped, goodBoyTracks).error, /ffprobe streams \[0 audio, 1 video, 2 subtitle\] cannot be matched/);
+  const wrongId = [goodBoyTracks[0], Object.assign({}, goodBoyTracks[1], { id: 5 }), goodBoyTracks[2]];
+  assert.match(mapTracks(entries, goodBoyStreams, wrongId).error, /mkvmerge track 5 is audio, header track 1 is audio/);
+  const extra = goodBoyStreams.concat([{ index: 3, codec_type: 'data', codec_name: 'bin_data' }]);
+  assert.match(mapTracks(entries, extra, goodBoyTracks).error, /\[0 video, 1 audio, 2 subtitle, 3 data\] cannot be matched/);
+});
+
+test('mapTracks: two different pairings that both fit are refused', () => {
+  // [metadata, subtitles, metadata] with two subtitle streams: the subtitle track could be either.
+  const entries = [{ type: 'metadata', codec: 'S_TEXT/UTF8' }, { type: 'subtitles', codec: 'S_TEXT/WEBVTT' }, { type: 'metadata', codec: 'S_TEXT/UTF8' }];
+  const streams = [{ index: 0, codec_type: 'subtitle', codec_name: 'subrip' }, { index: 1, codec_type: 'subtitle', codec_name: 'subrip' }];
+  const m = mapTracks(entries, streams, [{ id: 1, type: 'subtitles', properties: { codec_id: 'S_TEXT/WEBVTT' } }]);
+  assert.match(m.error, /match the file's tracks in more than one way/);
 });
 
 test('planTracks: S_TEXT/WEBVTT is converted, other unreadable subtitles are dropped', () => {
@@ -79,9 +176,9 @@ test('planTracks: S_TEXT/WEBVTT is converted, other unreadable subtitles are dro
   assert.deepStrictEqual(plan.drop.map((t) => t.id), [3]);
 });
 
-test('planTracks: throws when the ffprobe index is not an mkvmerge subtitle track', () => {
-  assert.throws(() => planTracks(goodBoyTracks, [1]), /stream 1/);
-  assert.throws(() => planTracks(goodBoyTracks, [7]), /stream 7/);
+test('planTracks: throws when an ID is not an mkvmerge subtitle track', () => {
+  assert.throws(() => planTracks(goodBoyTracks, [1]), /mkvmerge track 1, which is not a subtitle track/);
+  assert.throws(() => planTracks(goodBoyTracks, [7]), /mkvmerge track 7, which is not a subtitle track/);
 });
 
 test('buildMerge: Good Boy layout matches the hand-verified mkvmerge command', () => {
@@ -636,12 +733,16 @@ const run = (cfg) => {
     listings: {},
     merge: { status: 0, stdout: '', stderr: '' },
   }, cfg);
+  const header = c.header || headerOf(c.srcTracks);
   const files = Object.assign({}, { [W('track2.vtt')]: vtt4, [W('track2.srt')]: srt4 }, c.files);
   const calls = [];
   const unlinked = [];
   stubs = {
     fs: {
       existsSync: (p) => !(p in files) || files[p] !== null,
+      openSync: (p) => { if (p !== '/m/a.mkv') throw new Error('unexpected open ' + p); return 42; },
+      readSync: (fd, buf, off, len, pos) => header.copy(buf, off, pos, Math.min(pos + len, header.length)),
+      closeSync: () => {},
       unlinkSync: (p) => { unlinked.push(p); },
       readFileSync: (p) => {
         if (!(p in files) || files[p] === null) throw new Error('unexpected read ' + p);
@@ -708,7 +809,7 @@ test('plugin: converted-cue log separates left-out cues from invisible entries t
   ];
   const { res } = run({ files: { [W('track2.vtt')]: vtt, [W('track2.srt')]: srt }, outStreams });
   assert.strictEqual(res.error, undefined, res.infoLog);
-  assert.match(res.infoLog, /to SRT: 1 cues with text, 1 left out \(empty or blank\), 1 kept as an invisible entry\./);
+  assert.match(res.infoLog, /to SRT: 1 cue with text, 1 left out \(empty or blank\), 1 kept as an invisible entry\./);
 });
 
 test('plugin: mkvmerge exit 1 (warnings) passes and logs the warning', () => {
@@ -795,8 +896,39 @@ test('plugin: converted track metadata that differs in the output fails the job'
 
 test('plugin: ffprobe and mkvmerge disagreeing on the track layout fails before anything runs', () => {
   const { res, calls } = run({ srcTracks: goodBoyTracks.slice(0, 2).concat([goodBoyTracks[2], { id: 3, type: 'audio', properties: { codec_id: 'A_AAC' } }]) });
-  assert.match(res.error, /ffprobe sees 3 tracks, mkvmerge 4/);
+  assert.match(res.error, /ffprobe and mkvmerge disagree on the track layout: ffprobe streams \[0 video, 1 audio, 2 subtitle\] cannot be matched to the file's tracks \[video, audio, subtitles, audio\]/);
   assert.deepStrictEqual(cmds(calls, 'mkvextract'), []);
+});
+
+test('plugin: a video/audio/subtitle track mkvmerge cannot read would be lost, so the job fails', () => {
+  const header = mkvHeader([{ type: 'video', codec: 'V_MPEG4/ISO/AVC' }, { type: 'audio', codec: 'A_AAC' }, { type: 'subtitles', codec: 'S_TEXT/WEBVTT' }, { type: 'audio', codec: 'A_WEIRD' }]);
+  const { res } = run({ header });
+  assert.match(res.error, /mkvmerge lists 3 tracks, the file header has 4 video, audio and subtitle tracks/);
+});
+
+test('plugin: a buttons track in the middle is dropped with a log line; IDs and stream indexes are mapped', () => {
+  const header = mkvHeader([{ type: 'video', codec: 'V_MPEG4/ISO/AVC' }, { type: 'buttons', codec: 'B_VOBBTN' }, { type: 'audio', codec: 'A_AAC' }, { type: 'subtitles', codec: 'S_TEXT/WEBVTT' }]);
+  const srcTracks = [goodBoyTracks[0], Object.assign({}, goodBoyTracks[1], { id: 2 }), Object.assign({}, goodBoyTracks[2], { id: 3 })];
+  const { res, calls } = run({
+    header,
+    srcTracks,
+    inFormat: { duration: '120' },
+    files: { [W('track3.vtt')]: vtt4, [W('track3.srt')]: srt4 },
+  });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.match(res.infoLog, /Track 1 in the file \(buttons, B_VOBBTN\) is not a video, audio or subtitle track; mkvmerge can't read it, so it is dropped\./);
+  assert.deepStrictEqual(cmds(calls, 'mkvextract').map((x) => x.slice(1)), [['/m/a.mkv', 'tracks', '3:' + W('track3.vtt')]]);
+  const merge = cmds(calls, 'mkvmerge').find((x) => x[1] === '-o');
+  assert.deepStrictEqual(merge.slice(1, 6), ['-o', '/w/out.mkv', '--subtitle-tracks', '!3', '/m/a.mkv']);
+  assert.strictEqual(merge[merge.length - 1], '0:0,0:2,1:0');
+  assert.match(res.infoLog, /0 \(video\) 2500, 1 \(audio\) 4300\./);
+});
+
+test('plugin: a metadata track ffprobe lists without a type is dropped with a log line', () => {
+  const header = mkvHeader([{ type: 'video', codec: 'V_MPEG4/ISO/AVC' }, { type: 'audio', codec: 'A_AAC' }, { type: 'subtitles', codec: 'S_TEXT/WEBVTT' }, { type: 'metadata', codec: 'S_TEXT/UTF8' }]);
+  const { res } = run({ header, srcStreams: goodBoyStreams.concat([{ index: 3, codec_name: 'subrip' }]) });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.match(res.infoLog, /Track 3 in the file \(metadata, S_TEXT\/UTF8\) is not a video, audio or subtitle track; mkvmerge can't read it, so it is dropped\./);
 });
 
 test('plugin: mkvmerge killed by a signal fails the job, keeps the input and cleans up', () => {
@@ -898,6 +1030,16 @@ test('plugin: no duration in the probe data and ffprobe returns nothing: the job
     assert.match(res.error, /could not measure the input duration/, JSON.stringify(out));
     assert.strictEqual(res.file._id, '/m/a.mkv');
     assert.deepStrictEqual(cmds(calls, 'mkvextract'), []);
+  });
+});
+
+test('source files contain no raw invisible characters (BOM, NBSP, zero-width, bidi marks)', () => {
+  const fs = require('fs');
+  const invisible = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u00a0\u00ad\u200b-\u200f\u2028-\u202f\u2060-\u2064\ufeff]/;
+  [path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'), __filename].forEach((f) => {
+    fs.readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
+      assert.ok(!invisible.test(line), path.basename(f) + ':' + (i + 1) + ' has a raw invisible character; use an escape');
+    });
   });
 });
 

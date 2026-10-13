@@ -8,8 +8,8 @@ const details = () => {
     Name: "Convert unsupported subtitles",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT, and muxed back in their original position with their language, name and flags. Cues that are empty or only whitespace are left out, as are cues whose only content is markup SRT can't carry (such as <c> tags); cues holding only SRT formatting or a non-breaking space stay as invisible entries. A WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track. The result is verified before it is used: track layout, codecs and the converted tracks' language, name and flags; the cue count of each converted track; an exact packet count for every kept track except PCM, which is checked by exact payload bytes, and kept SRT tracks, whose expected count leaves out the blank blocks mkvmerge drops; and the duration. If anything fails, the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
-    Version: "1.04",
+    Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT, and muxed back in their original position with their language, name and flags. Cues that are empty or only whitespace are left out, as are cues whose only content is markup SRT can't carry (such as <c> tags); cues holding only SRT formatting or a non-breaking space stay as invisible entries. A WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track and any Matroska track that is not video, audio or subtitles (such as DVD buttons), which mkvmerge cannot keep. The result is verified before it is used: track layout, codecs and the converted tracks' language, name and flags; the cue count of each converted track; an exact packet count for every kept track except PCM, which is checked by exact payload bytes, and kept SRT tracks, whose expected count leaves out the blank blocks mkvmerge drops; and the duration. If anything fails, the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
+    Version: "1.05",
     Tags: "pre-processing,mkvmerge,subtitle",
     Inputs: [],
   };
@@ -51,34 +51,156 @@ var findUnreadableSubs = function (streams) {
     .map(function (s) { return s.index; });
 };
 
-// The plugin pairs ffprobe stream N with mkvmerge track N. Measured in the Tdarr node: ffprobe
-// lists every track first, in file order, then cover art (a "video" stream with
-// disposition.attached_pic) and other attachments (codec_type "attachment"); mkvmerge -J lists
-// only the tracks (attachments, cover art included, are separate). Returns the mismatch, or null.
+// --- which track is which ---
+// Measured in the Tdarr node (ffprobe 7.1.4, mkvmerge v99) with Matroska TrackType values other
+// than video/audio/subtitle (buttons 0x12, logo 0x10, complex 0x03, control 0x20, metadata 0x21):
+//  - FFmpeg cannot write such tracks into Matroska ("Only audio, video, and subtitles are supported").
+//  - mkvmerge -J leaves them out, but its track IDs are positions in the Tracks element, so one in
+//    the middle leaves a gap (0, 2, 3); a remux drops them.
+//  - ffprobe skips them and renumbers its streams (0, 1, 2), except a track whose codec it knows:
+//    a metadata track with S_TEXT/UTF8 is listed as subrip, with no codec_type or as "subtitle".
+//  - ffprobe lists cover art as a "video" stream with disposition.attached_pic and other
+//    attachments as "attachment", after the tracks; mkvmerge -J lists neither as tracks.
+// So the Matroska Tracks header is read to know every track, ffprobe streams are aligned with it
+// (mapTracks), and other track types are dropped (logged), since mkvmerge cannot keep them and
+// they are not playable media.
+var TRACK_TYPES = { 1: 'video', 2: 'audio', 3: 'complex', 16: 'logo', 17: 'subtitles', 18: 'buttons', 32: 'control', 33: 'metadata' };
 var STREAM_TYPE = { video: 'video', audio: 'audio', subtitle: 'subtitles' };
-var checkTrackMapping = function (streams, mkvTracks) {
-  var tracks = (streams || []).filter(function (s) {
-    return s.codec_type !== 'attachment' && !(s.disposition && s.disposition.attached_pic);
-  });
-  if (tracks.length !== mkvTracks.length) return 'ffprobe sees ' + tracks.length + ' tracks, mkvmerge ' + mkvTracks.length;
-  for (var i = 0; i < tracks.length; i += 1) {
-    var s = tracks[i];
-    var t = mkvTracks[i];
-    if (s.index !== t.id || STREAM_TYPE[s.codec_type] !== t.type) {
-      return 'ffprobe stream ' + s.index + ' is ' + s.codec_type + ', mkvmerge track ' + t.id + ' is ' + t.type;
+
+// The TrackEntries of a Matroska file, in order: [{type, codec}]. read(pos, len) returns up to
+// len bytes at pos. Only element headers are read until the Tracks element (clusters are skipped
+// by size, never read).
+var readTrackEntries = function (read) {
+  var vint = function (buf, at, keepMarker) {
+    if (at >= buf.length) throw new Error('Matroska header is truncated');
+    var first = buf[at];
+    var len = 1;
+    while (len <= 8 && !(first & (0x100 >> len))) len += 1;
+    if (len > 8 || at + len > buf.length) throw new Error('Matroska header is truncated or invalid');
+    var value = keepMarker ? first : first & (0xff >> len);
+    var unknown = !keepMarker && value === (0xff >> len);
+    for (var i = 1; i < len; i += 1) {
+      value = value * 256 + buf[at + i];
+      if (buf[at + i] !== 0xff) unknown = false;
     }
+    return { len: len, value: value, unknown: unknown };
+  };
+  // The element header at pos: {id (hex), data (offset of its data), size (null if unknown)}.
+  var header = function (pos) {
+    var buf = read(pos, 12);
+    var id = vint(buf, 0, true);
+    var size = vint(buf, id.len, false);
+    return { id: buf.slice(0, id.len).toString('hex'), data: pos + id.len + size.len, size: size.unknown ? null : size.value };
+  };
+  var children = function (buf) {
+    var out = [];
+    var at = 0;
+    while (at < buf.length) {
+      var id = vint(buf, at, true);
+      var size = vint(buf, at + id.len, false);
+      var start = at + id.len + size.len;
+      if (start + size.value > buf.length) throw new Error('Matroska Tracks element is truncated');
+      out.push({ id: buf.slice(at, at + id.len).toString('hex'), data: buf.slice(start, start + size.value) });
+      at = start + size.value;
+    }
+    return out;
+  };
+  var ebmlHead = header(0);
+  if (ebmlHead.id !== '1a45dfa3' || ebmlHead.size === null) throw new Error('not a Matroska file (no EBML header)');
+  var segment = header(ebmlHead.data + ebmlHead.size);
+  if (segment.id !== '18538067') throw new Error('not a Matroska file (no Segment)');
+  var pos = segment.data;
+  for (var guard = 0; guard < 10000; guard += 1) {
+    var el = header(pos);
+    if (el.id === '1f43b675') throw new Error('no Tracks element before the first Cluster');
+    if (el.size === null) throw new Error('element ' + el.id + ' of unknown size before the Tracks element');
+    if (el.id === '1654ae6b') {
+      var tracks = read(el.data, el.size);
+      if (tracks.length < el.size) throw new Error('Matroska Tracks element is truncated');
+      return children(tracks).filter(function (c) { return c.id === 'ae'; }).map(function (entry) {
+        var fields = {};
+        children(entry.data).forEach(function (c) { fields[c.id] = c.data; });
+        var type = fields['83'] ? fields['83'].reduce(function (v, byte) { return v * 256 + byte; }, 0) : 0;
+        return { type: TRACK_TYPES[type] || 'type ' + type, codec: fields['86'] ? fields['86'].toString() : '' };
+      });
+    }
+    pos = el.data + el.size;
   }
-  return null;
+  throw new Error('no Tracks element found');
 };
 
-// Splits the unreadable subtitle tracks into WebVTT tracks to convert and others to drop.
-var planTracks = function (mkvTracks, unreadableIdx) {
+// Pairs the file's tracks (entries, from readTrackEntries) with mkvmerge's tracks (ID = position
+// in entries) and ffprobe's streams. ffprobe lists the streams in track order, one per video,
+// audio and subtitle track, and may or may not list a track of another type (see above), so each
+// video/audio/subtitle entry takes the next stream, which must have its type, and each other entry
+// takes one stream or none. The media pairing must be the only one that accounts for every stream.
+// Returns {ffIndex: mkvmerge ID -> ffprobe index, mkvId: ffprobe index -> mkvmerge ID,
+// others: [{id, type, codec}] tracks mkvmerge can't read}, or {error}.
+var mapTracks = function (entries, streams, mkvTracks) {
+  var isMedia = function (e) { return e.type === 'video' || e.type === 'audio' || e.type === 'subtitles'; };
+  var media = [];
+  var others = [];
+  entries.forEach(function (e, id) {
+    if (isMedia(e)) media.push({ id: id, type: e.type });
+    else others.push({ id: id, type: e.type, codec: e.codec });
+  });
+  if (mkvTracks.length !== media.length) {
+    return { error: 'mkvmerge lists ' + mkvTracks.length + ' tracks, the file header has ' + media.length + ' video, audio and subtitle tracks' };
+  }
+  for (var i = 0; i < media.length; i += 1) {
+    if (mkvTracks[i].id !== media[i].id || mkvTracks[i].type !== media[i].type) {
+      return { error: 'mkvmerge track ' + mkvTracks[i].id + ' is ' + mkvTracks[i].type + ', header track ' + media[i].id + ' is ' + media[i].type };
+    }
+  }
+  var list = (streams || []).filter(function (st) { return !(st.disposition && st.disposition.attached_pic) && st.codec_type !== 'attachment'; });
+  // Every alignment of entries[e..] with list[k..], as media pairings "id:index,..." (at most 2 kept).
+  var memo = {};
+  var align = function (e, k) {
+    var key = e + ',' + k;
+    if (memo[key]) return memo[key];
+    var out = [];
+    var add = function (rest, pair) {
+      rest.forEach(function (r) {
+        var x = pair ? (r ? pair + ',' + r : pair) : r;
+        if (out.length < 2 && out.indexOf(x) === -1) out.push(x);
+      });
+    };
+    if (e === entries.length) {
+      if (k === list.length) out.push('');
+    } else if (isMedia(entries[e])) {
+      if (k < list.length && STREAM_TYPE[list[k].codec_type] === entries[e].type) add(align(e + 1, k + 1), e + ':' + list[k].index);
+    } else {
+      add(align(e + 1, k), '');
+      if (k < list.length) add(align(e + 1, k + 1), '');
+    }
+    memo[key] = out;
+    return out;
+  };
+  var found = align(0, 0);
+  var describe = '[' + list.map(function (st) { return st.index + ' ' + (st.codec_type || 'untyped'); }).join(', ') + ']';
+  if (found.length === 0) {
+    return { error: 'ffprobe streams ' + describe + ' cannot be matched to the file\'s tracks ['
+      + entries.map(function (e) { return e.type; }).join(', ') + ']' };
+  }
+  if (found.length > 1) return { error: 'ffprobe streams ' + describe + ' match the file\'s tracks in more than one way' };
+  var ffIndex = {};
+  var mkvId = {};
+  (found[0] ? found[0].split(',') : []).forEach(function (pair) {
+    var ids = pair.split(':');
+    ffIndex[ids[0]] = Number(ids[1]);
+    mkvId[ids[1]] = Number(ids[0]);
+  });
+  return { ffIndex: ffIndex, mkvId: mkvId, others: others };
+};
+
+// Splits the unreadable subtitle tracks (mkvmerge IDs) into WebVTT tracks to convert and others to drop.
+var planTracks = function (mkvTracks, unreadableIds) {
   var convert = [];
   var drop = [];
-  unreadableIdx.forEach(function (idx) {
+  unreadableIds.forEach(function (idx) {
     var track = mkvTracks.find(function (t) { return t.id === idx; });
     if (!track || track.type !== 'subtitles') {
-      throw new Error('ffprobe subtitle stream ' + idx + ' has no matching mkvmerge subtitle track');
+      throw new Error('unreadable subtitle maps to mkvmerge track ' + idx + ', which is not a subtitle track');
     }
     if ((track.properties || {}).codec_id === WEBVTT_CODEC_ID) convert.push(track);
     else drop.push(track);
@@ -222,7 +344,7 @@ var filtersBlankBlocks = function (codecId) {
 // starts with its number and timing line after an empty line, so a block's own blank lines stay
 // inside it. ffprobe and mkvextract both skip zero-size blocks, so entries equal ffprobe's count.
 var parseExtractedSrt = function (text) {
-  var lines = String(text || '').replace(/^﻿/, '').split(/\r?\n/);
+  var lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
   var starts = [];
   for (var i = 0; i < lines.length; i += 1) {
     if (lines[i] === String(starts.length + 1) && TIMING.test(lines[i + 1] || '') && (i === 0 || lines[i - 1] === '')) {
@@ -245,7 +367,7 @@ var keptTextStats = function (text) {
 // even for a track with no cues. Returns the problem, or null. text is null when the file is missing.
 var vttProblem = function (text) {
   if (text === null || text === undefined) return 'is missing';
-  if (!/^﻿?WEBVTT(?:[ \t]|\r?\n|$)/.test(text)) return 'is not a WebVTT file (no WEBVTT signature)';
+  if (!/^\uFEFF?WEBVTT(?:[ \t]|\r?\n|$)/.test(text)) return 'is not a WebVTT file (no WEBVTT signature)';
   return null;
 };
 
@@ -488,10 +610,24 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     if (!(inDuration > 0)) throw new Error('could not measure the input duration');
 
     var mkvTracks = identify(file._id);
-    var mapping = checkTrackMapping(srcStreams, mkvTracks);
-    if (mapping) throw new Error('ffprobe and mkvmerge disagree on the track layout: ' + mapping);
-    var plan = planTracks(mkvTracks, unreadable);
+    // Every track in the file, from its Tracks header (a few small reads).
+    var fd = fs.openSync(file._id, 'r');
+    var entries;
+    try {
+      entries = readTrackEntries(function (pos, len) {
+        var buf = Buffer.alloc(len);
+        return buf.slice(0, fs.readSync(fd, buf, 0, len, pos));
+      });
+    } finally {
+      fs.closeSync(fd);
+    }
+    var map = mapTracks(entries, srcStreams, mkvTracks);
+    if (map.error) throw new Error('ffprobe and mkvmerge disagree on the track layout: ' + map.error);
+    var plan = planTracks(mkvTracks, unreadable.map(function (idx) { return map.mkvId[idx]; }));
 
+    map.others.forEach(function (o) {
+      response.infoLog += 'Track ' + o.id + ' in the file (' + o.type + ', ' + o.codec + ') is not a video, audio or subtitle track; mkvmerge can\'t read it, so it is dropped.\r\n';
+    });
     plan.drop.forEach(function (t) {
       response.infoLog += 'Subtitle track ' + t.id + ' (' + (t.properties || {}).codec_id + ') is unreadable and not convertible, dropping it.\r\n';
     });
@@ -521,7 +657,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     // Convert each WebVTT track to SRT.
     var srtPaths = {};
     var expectedPackets = {};
-    var lossy = plan.drop.length > 0;
+    var lossy = plan.drop.length > 0 || map.others.length > 0;
     var converted = [];
     plan.convert.forEach(function (t) {
       var vtt = vttPaths[t.id];
@@ -533,7 +669,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         // Nothing to show: drop it like any other unconvertible track.
         plan.drop.push(t);
         lossy = true;
-        response.infoLog += 'WebVTT track ' + t.id + ' has no cues with text (' + vttStats.total + ' cues), dropping it.\r\n';
+        response.infoLog += 'WebVTT track ' + t.id + ' has no cues with text (' + plural(vttStats.total, 'cue', 'cues') + '), dropping it.\r\n';
         return;
       }
       var srt = path.join(workDir, 'track' + t.id + '.srt');
@@ -550,7 +686,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       var invisible = srtStats.muxed - srtStats.content;
       if (leftOut !== 0) lossy = true;
       converted.push(t);
-      response.infoLog += 'Converted WebVTT track ' + t.id + ' (' + trackLanguage(t) + ') to SRT: ' + srtStats.content + ' cues with text'
+      response.infoLog += 'Converted WebVTT track ' + t.id + ' (' + trackLanguage(t) + ') to SRT: ' + plural(srtStats.content, 'cue', 'cues') + ' with text'
         + (leftOut ? ', ' + leftOut + ' left out (empty or blank)' : '')
         + (invisible ? ', ' + invisible + ' kept as ' + (invisible === 1 ? 'an invisible entry' : 'invisible entries') : '') + '.\r\n';
     });
@@ -598,7 +734,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       if (!os) return; // verifyOutput reports the missing stream
       var bytes = !l.converted && comparesBytes(os.codec_name);
       outCounts[i] = countOf(outPath, i, os, bytes);
-      if (!l.converted) srcCounts[l.track.id] = countOf(file._id, l.track.id, inByIndex[l.track.id], bytes);
+      if (!l.converted) srcCounts[l.track.id] = countOf(file._id, map.ffIndex[l.track.id], inByIndex[map.ffIndex[l.track.id]], bytes);
     });
     var problem = verifyOutput({
       layout: built.layout,
@@ -648,7 +784,8 @@ module.exports.plugin = plugin;
 // Pure helpers, exported for tests/convert_unsupported_subs.test.js. Tdarr only uses details and plugin.
 module.exports._test = {
   findUnreadableSubs: findUnreadableSubs,
-  checkTrackMapping: checkTrackMapping,
+  readTrackEntries: readTrackEntries,
+  mapTracks: mapTracks,
   planTracks: planTracks,
   buildMerge: buildMerge,
   toolFailed: toolFailed,
