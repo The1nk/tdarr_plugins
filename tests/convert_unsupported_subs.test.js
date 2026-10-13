@@ -665,7 +665,7 @@ test('plugin: PCM is verified by payload bytes listed on both files', () => {
   const { res, calls } = runFull('2500', pcm);
   assert.strictEqual(res.error, undefined, res.infoLog);
   assert.deepStrictEqual(listingCalls(calls), ['/m/a.mkv#1', '/w/out.mkv#1']);
-  assert.match(res.infoLog, /1 \(audio\) 12000 bytes/);
+  assert.match(res.infoLog, /kept streams match the source exactly \(packets, or bytes for PCM\): 0 \(video\) 2500, 1 \(audio\) 12000 bytes\./);
   const short = runFull('2500', Object.assign({}, pcm, { listings: { '/m/a.mkv#1': '4000\n4000\n4000\n', '/w/out.mkv#1': '6000\n5999\n' } }));
   assert.match(short.res.error, /output stream 1 \(audio, pcm_s16le\) has 11999 bytes, source has 12000/);
 });
@@ -713,4 +713,9 @@ test('plugin: no duration in the probe data and ffprobe returns nothing: the job
 
 test('details: id matches the filename', () => {
   assert.strictEqual(pluginModule.details().id, 'Tdarr_Plugin_the1nk_convert_unsupported_subs');
+});
+
+test('details: description names the PCM byte check', () => {
+  assert.match(pluginModule.details().Description,
+    /exact packet count for every kept track except PCM, which is checked by exact payload bytes/);
 });

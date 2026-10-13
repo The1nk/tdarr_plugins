@@ -8,7 +8,7 @@ const details = () => {
     Name: "Convert unsupported subtitles",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT, and muxed back in their original position with their language, name and flags. Cues with no visible text are left out; a WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track. The result is verified before it is used (track layout and codecs, cue counts of converted tracks, an exact packet count for every kept track, duration); if anything fails the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
+    Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT, and muxed back in their original position with their language, name and flags. Cues with no visible text are left out; a WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track. The result is verified before it is used (track layout and codecs, cue counts of converted tracks, an exact packet count for every kept track except PCM, which is checked by exact payload bytes, duration); if anything fails the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
     Version: "1.03",
     Tags: "pre-processing,mkvmerge,subtitle",
     Inputs: [],
@@ -492,7 +492,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       kept.push(i + ' (' + s.codec_type + ') ' + (comparesBytes(s.codec_name) ? outBytes[i] + ' bytes' : packetCount(s.nb_read_packets)));
     });
     response.infoLog += 'Verified: ' + outTracks.length + ' tracks, every subtitle track readable, cue counts match; '
-      + 'packets per kept stream match the source: ' + (kept.join(', ') || 'none') + '.\r\n';
+      + 'kept streams match the source exactly (packets, or bytes for PCM): ' + (kept.join(', ') || 'none') + '.\r\n';
     removeFiles(temps);
     // Hand the new file to the next flow plugin (the runner picks up the new _id).
     response.file = Object.assign({}, file, { _id: outPath, file: outPath });
