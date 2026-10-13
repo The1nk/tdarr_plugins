@@ -123,14 +123,14 @@ Already-processed files are skipped via a `TDARR_DRC_PROCESSED` metadata tag.
 #### `Tdarr_Plugin_the1nk_convert_unsupported_subs`
 **Convert Unsupported Subtitles** — v1.06 _(flow-only)_
 
-Fixes MKVs with subtitle tracks that FFmpeg can't read (ffprobe reports no codec). The known case is WebVTT muxed by recent mkvmerge with codec ID `S_TEXT/WEBVTT`, which FFmpeg 7.1 (and current FFmpeg) can't demux. Every later `-map 0 -c copy` step then fails with `Subtitle codec 0 is not supported`.
+Fixes MKVs with subtitle tracks that FFmpeg can't read (ffprobe reports no codec). The known case is WebVTT muxed by recent mkvmerge with codec ID `S_TEXT/WEBVTT`, which FFmpeg 7.1.4 in the Tdarr node (and an August 2025 FFmpeg git build) can't demux. Every later `-map 0 -c copy` step then fails with `Subtitle codec 0 is not supported`.
 
 - **Gate:** MKV only, and at least one subtitle stream with no codec. Everything else passes through untouched.
 - **Convert:** reads the Matroska track header to map tracks between ffprobe and mkvmerge, `mkvextract`s each WebVTT track, converts it to SRT with FFmpeg, and `mkvmerge` writes a new MKV to the flow cache with the SRT in the original track position, keeping language, name and flags. Cues that are empty or whitespace-only (or hold only markup SRT can't carry, such as `<c>` tags) are left out.
 - **Dropped (logged):** WebVTT tracks with no cue text, any other unreadable subtitle track, and Matroska track types that aren't video, audio or subtitles (e.g. DVD buttons), which mkvmerge can't carry.
 - **Verify:** track layout, codecs and the converted tracks' language, name and flags; every subtitle readable; cue counts (WebVTT, SRT and muxed track) compared like with like; an exact packet count for every kept track (PCM by exact payload bytes; kept SRT/ASCII text tracks allow for mkvmerge dropping blocks that are only whitespace); and duration sanity. If any check fails, the job fails with the reason and the library file is never touched.
 
-The plugin runs mkvtoolnix itself and passes the new file to the next flow node by changing `file._id`, so it only works inside a flow (it needs `cacheFilePath`). It needs `mkvmerge` and `mkvextract` (mkvtoolnix) and Tdarr's bundled ffprobe, all present in the Tdarr node image. In a flow, put it **first** (see [Ordering rules](#ordering-rules)).
+The plugin runs mkvtoolnix itself and passes the new file to the next flow node by changing `file._id`, so it only works inside a flow (it needs `cacheFilePath`). It needs `mkvmerge` and `mkvextract` (mkvtoolnix) and ffprobe (Tdarr's bundled copy, else one next to an absolute `ffmpegPath`, else on PATH), all present in the Tdarr node image. In a flow, put it **first** (see [Ordering rules](#ordering-rules)).
 
 No inputs.
 
