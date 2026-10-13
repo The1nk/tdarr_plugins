@@ -57,7 +57,7 @@ try {
   const before = runDrc(SRC, path.join(WORK, 'drc-source.mkv'));
   assert.strictEqual(before.error, undefined, 'could not run ffmpeg: ' + (before.error && before.error.message));
   assert.ok(typeof before.status === 'number' && before.status !== 0, 'expected DRC ffmpeg to fail on the source, status ' + before.status);
-  assert.match(before.stderr, /Subtitle codec 0 is not supported|Could not write header/, 'ffmpeg failed for another reason: ' + before.stderr);
+  assert.match(before.stderr, /Subtitle codec 0 is not supported/, 'ffmpeg failed for another reason: ' + before.stderr);
   console.log('PASS 1: DRC ffmpeg fails on the source with the production error (bug reproduced)');
 
   // 2. Convert.
