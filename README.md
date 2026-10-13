@@ -24,7 +24,8 @@ flowchart TD
     f1 -- already suffixed --> stop([End])
     f1 -- continue --> f2{{Processed Tag Filter}}
     f2 -- has TDARR_PROCESSED --> stop
-    f2 -- continue --> t2[Remove Streams By Property<br/>codec_name = bmp]
+    f2 -- continue --> t1[Convert Unsupported Subtitles<br/>WebVTT to SRT]
+    t1 --> t2[Remove Streams By Property<br/>codec_name = bmp]
     t2 --> t3[Migz Remux Container<br/>mkv, force_conform]
     t3 --> t4[Remove Data Streams]
     t4 --> t5[Migz Remove Image Formats]
@@ -45,6 +46,7 @@ Both outputs of every transcode node ("processed" / "not processed") lead to the
 ### Ordering rules
 
 - **Inside a flow, a classic plugin sees the current _working_ file.** After any FFmpeg step, that file is a temp copy in Tdarr's cache directory (`file._id` and `file.meta.Directory` point there), not the file in your library.
+- **Convert Unsupported Subtitles goes _first_, before any FFmpeg step.** Every later step copies all streams (`-map 0 -c copy`), and FFmpeg can't copy a track it can't read, so a single WebVTT track stored as `S_TEXT/WEBVTT` fails the whole flow with `Subtitle codec 0 is not supported`.
 - **Repair Frame Rate goes _after_ H265 CPU Transcode.** It's the last step that touches video, so the repair can't be undone by a later FFmpeg pass.
 - **mkvpropedit runs twice, both times as `refresh_only`.** FFmpeg copies existing statistics unchanged onto the streams it re-encodes, so a re-encoded video can claim its old H.264 bitrate. The first run comes after DRC and Reorder, just before H265 CPU Transcode, so its `max_bitrate` check reads up-to-date `BPS` values. The second run comes after the last step that changes the file (x265 / Repair Frame Rate), so the final file's statistics match its streams.
 - **Nothing edits the library file in place.** Radarr and Sonarr hardlink imports to the torrent client's copies, so an in-place edit would also change the seeding torrent. Every step before Replace Original File writes to the Tdarr cache; mkvpropedit `refresh_only` refuses to touch the original; and Add Suffix only renames. That's why the flows don't need Break Hardlink, which used to cost a full copy of every file.
@@ -115,6 +117,22 @@ Already-processed files are skipped via a `TDARR_DRC_PROCESSED` metadata tag.
 | `drc_attack` | number | `200` | Attack time in milliseconds |
 | `drc_release` | number | `1000` | Release time in milliseconds |
 | `drc_makeup` | number | `4` | Makeup gain in dB applied after compression |
+
+---
+
+#### `Tdarr_Plugin_the1nk_convert_unsupported_subs`
+**Convert Unsupported Subtitles** — v1.06 _(flow-only)_
+
+Fixes MKVs with subtitle tracks that FFmpeg can't read (ffprobe reports no codec). The known case is WebVTT muxed by recent mkvmerge with codec ID `S_TEXT/WEBVTT`, which FFmpeg 7.1 (and current FFmpeg) can't demux. Every later `-map 0 -c copy` step then fails with `Subtitle codec 0 is not supported`.
+
+- **Gate:** MKV only, and at least one subtitle stream with no codec. Everything else passes through untouched.
+- **Convert:** reads the Matroska track header to map tracks between ffprobe and mkvmerge, `mkvextract`s each WebVTT track, converts it to SRT with FFmpeg, and `mkvmerge` writes a new MKV to the flow cache with the SRT in the original track position, keeping language, name and flags. Cues that are empty or whitespace-only (or hold only markup SRT can't carry, such as `<c>` tags) are left out.
+- **Dropped (logged):** WebVTT tracks with no cue text, any other unreadable subtitle track, and Matroska track types that aren't video, audio or subtitles (e.g. DVD buttons), which mkvmerge can't carry.
+- **Verify:** track layout, codecs and the converted tracks' language, name and flags; every subtitle readable; cue counts (WebVTT, SRT and muxed track) compared like with like; an exact packet count for every kept track (PCM by exact payload bytes; kept SRT/ASCII text tracks allow for mkvmerge dropping blocks that are only whitespace); and duration sanity. If any check fails, the job fails with the reason and the library file is never touched.
+
+The plugin runs mkvtoolnix itself and passes the new file to the next flow node by changing `file._id`, so it only works inside a flow (it needs `cacheFilePath`). It needs `mkvmerge` and `mkvextract` (mkvtoolnix) and Tdarr's bundled ffprobe, all present in the Tdarr node image. In a flow, put it **first** (see [Ordering rules](#ordering-rules)).
+
+No inputs.
 
 ---
 
@@ -235,3 +253,24 @@ These are unmodified community plugins kept in `Local` so the flows reference a 
 ## Deployment
 
 See [`CLAUDE.md`](CLAUDE.md) for deployment instructions (push/pull scripts).
+
+---
+
+## Tests
+
+Unit tests (no Tdarr or media tools needed):
+
+```bash
+node --test tests/*.test.js
+```
+
+Integration test for `Tdarr_Plugin_the1nk_convert_unsupported_subs`, run inside the `tdarr-node` container against a real file with an `S_TEXT/WEBVTT` subtitle track. It reproduces the production failure on that file, converts it, and shows the DRC step then succeeds. It only writes under `/tmp/itest` in the container. Stage it, run it (a few minutes on a large file) and clean up from the repo root in Git Bash (`MSYS_NO_PATHCONV` stops container paths being rewritten):
+
+```bash
+MSYS_NO_PATHCONV=1 docker exec tdarr-node sh -c 'rm -rf /tmp/itest && mkdir -p /tmp/itest/plugins/Local && ln -s /app/Tdarr_Node/assets/app/plugins/methods /tmp/itest/plugins/methods'
+MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_convert_unsupported_subs.js tdarr-node:/tmp/itest/plugins/Local/
+MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_downmix_to_stereo_and_apply_DRC.js tdarr-node:/tmp/itest/plugins/Local/
+MSYS_NO_PATHCONV=1 docker cp tests/container/convert_unsupported_subs.itest.js tdarr-node:/tmp/itest/plugins/
+MSYS_NO_PATHCONV=1 docker exec tdarr-node node /tmp/itest/plugins/convert_unsupported_subs.itest.js "<source mkv under /media>"
+MSYS_NO_PATHCONV=1 docker exec tdarr-node rm -rf /tmp/itest
+```

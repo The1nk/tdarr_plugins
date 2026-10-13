@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Pull from Tdarr** (copy all `.js` files from the Tdarr plugins dir into this repo): `./pull.ps1`
 - **Push to Tdarr** (copy all `.js` files from this repo into the Tdarr plugins dir): `./push.ps1`
 
-There is no build step, linter config, or test runner configured in this repo.
+There is no build step or linter config. Unit tests run with `node --test tests/*.test.js` (Node 25 doesn't accept `node --test tests/`); the container integration test is described in the README "Tests" section.
 
 ## Plugin Architecture
 
