@@ -5,8 +5,9 @@ const details = () => ({
   Name: 'Migz Remux Container',
   Type: 'Video',
   Operation: 'Transcode',
-  Description: 'Files will be remuxed into either mkv or mp4. \n\n',
-  Version: '1.2',
+  Description: 'Files will be remuxed into either mkv or mp4. \n\n'
+    + 'Local copy (the1nk): also treats a file as video when ffprobe finds a video stream that isn\'t cover art, because Tdarr labels MPEG-TS files "audio". \n\n',
+  Version: '1.2.1',
   Tags: 'pre-processing,ffmpeg,video only,configurable',
   Inputs: [{
     name: 'container',
@@ -72,7 +73,12 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   response.container = `.${inputs.container}`;
 
   // Check if file is a video. If it isn't then exit plugin.
-  if (file.fileMedium !== 'video') {
+  // the1nk: Tdarr's scanner labels MPEG-TS (.ts) files "audio", so also trust a real (non-cover-art)
+  // video stream in ffprobe's data.
+  const probeStreams = (file.ffProbeData && file.ffProbeData.streams) || [];
+  const hasVideoStream = probeStreams.some((s) => s.codec_type === 'video'
+    && !(s.disposition && s.disposition.attached_pic));
+  if (file.fileMedium !== 'video' && !hasVideoStream) {
     response.processFile = false;
     response.infoLog += '☒File is not a video. \n';
     return response;
