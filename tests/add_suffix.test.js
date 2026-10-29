@@ -32,7 +32,7 @@ test('add suffix: a .ts that ExifTool calls m2t keeps .ts', () => {
   const file = { _id: old, fileNameWithoutExtension: 'Space King - S01E02 - House of a Thousand Furries',
     meta: { Directory: '/temp/w', FileTypeExtension: 'm2t' } };
   const { res, renames } = run(file);
-  const expected = path.join('/temp/w', 'Space King - S01E02 - House of a Thousand Furries (Tdarr).ts');
+  const expected = '/temp/w/Space King - S01E02 - House of a Thousand Furries (Tdarr).ts';
   assert.strictEqual(res.file._id, expected);
   assert.deepStrictEqual(renames, [[old, expected]]);
   assert.strictEqual(res.updateDB, true);
@@ -51,7 +51,7 @@ test('add suffix: a trailing empty () is cleaned', () => {
     fileNameWithoutExtension: 'Good Boy (2025) {imdb-tt35521922} ()',
     meta: { Directory: '/m', FileTypeExtension: 'mkv' } };
   const { res } = run(file);
-  assert.strictEqual(res.file._id, path.join('/m', 'Good Boy (2025) {imdb-tt35521922} (Tdarr).mkv'));
+  assert.strictEqual(res.file._id, '/m/Good Boy (2025) {imdb-tt35521922} (Tdarr).mkv');
 });
 
 test('add suffix: an already-suffixed name is not renamed', () => {
@@ -60,4 +60,23 @@ test('add suffix: an already-suffixed name is not renamed', () => {
   const { res, renames } = run(file);
   assert.deepStrictEqual(renames, []);
   assert.strictEqual(res.updateDB, false);
+});
+
+test('add suffix: a dotted name keeps its dots and extension', () => {
+  const file = { _id: '/m/Mr. Robot - S01E01.mkv', fileNameWithoutExtension: 'Mr. Robot - S01E01',
+    meta: { Directory: '/m', FileTypeExtension: 'mkv' } };
+  assert.strictEqual(run(file).res.file._id, '/m/Mr. Robot - S01E01 (Tdarr).mkv');
+});
+
+test('add suffix: an upper-case extension is kept as it is', () => {
+  const file = { _id: '/m/UPPER.MKV', fileNameWithoutExtension: 'UPPER', meta: { Directory: '/m', FileTypeExtension: 'mkv' } };
+  assert.strictEqual(run(file).res.file._id, '/m/UPPER (Tdarr).MKV');
+});
+
+test('add suffix: a file record without meta is still renamed', () => {
+  const file = { _id: '/m/Movie.mkv', fileNameWithoutExtension: 'Movie' };
+  const { res, renames } = run(file);
+  assert.deepStrictEqual(renames, [['/m/Movie.mkv', '/m/Movie (Tdarr).mkv']]);
+  assert.strictEqual(res.updateDB, true);
+  assert.strictEqual(res.error, undefined);
 });

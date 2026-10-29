@@ -32,8 +32,8 @@
 
 ```js
   // Check if file is a video. If it isn't then exit plugin.
-  // the1nk: Tdarr's scanner labels MPEG-TS (.ts) files "audio", so also trust a real (non-cover-art)
-  // video stream in ffprobe's data.
+  // the1nk: Tdarr labels a file "audio" when its video stream's average frame rate reads 0/0 (seen on some
+  // MPEG-TS captures), so also trust a real (non-cover-art) video stream in ffprobe's data.
   const probeStreams = (file.ffProbeData && file.ffProbeData.streams) || [];
   const hasVideoStream = probeStreams.some((s) => s.codec_type === 'video'
     && !(s.disposition && s.disposition.attached_pic));
@@ -44,8 +44,21 @@
   }
 ```
 
-  Set `Version: '1.2.1'` and append to `Description`: `'Local copy (the1nk): also treats a file as video when ffprobe finds a video stream that isn\'t cover art, because Tdarr labels MPEG-TS files "audio". \n\n'`.
-- [ ] **Step 4: README.** In "Local copies of community plugins", change "These are unmodified community plugins" to say they are community plugins kept in `Local`, unmodified except where noted, and add to the Migz Remux row: "**Modified (v1.2.1):** also remuxes files Tdarr labels audio when ffprobe finds a real video stream (MPEG-TS `.ts` files)".
+  Set `Version: '1.2.1'` and append to `Description`: `'Local copy (the1nk): also treats a file as video when ffprobe finds a video stream that isn\'t cover art, because Tdarr labels a file audio when its video frame rate reads 0/0 (seen on some MPEG-TS captures); remuxing re-derives it. \n\n'`.
+
+  Also replace the container check with this, so a file labelled audio that has a real video stream is remuxed even when the container matches (the other `if`/`else` branches stay as they are):
+
+```js
+  if (file.fileMedium !== 'video' && file.container === inputs.container) {
+    response.infoLog += '☒Tdarr labels this file audio (its video frame rate reads 0/0). Remuxing so later steps see a video. \n';
+    convert = true;
+    genpts = '-fflags +genpts';
+  } else if (file.container !== inputs.container) {
+    // ...existing "Remuxing." branch
+```
+
+  Extra tests: an `.mkv` labelled audio with a video stream at `avg_frame_rate: '0/0'` is remuxed (preset `'-fflags +genpts, -map 0 -c copy -max_muxing_queue_size 9999 -map -0:d '`, container `.mkv`, the new log line); an `.mkv` labelled video is still "already in mkv"; a real-format TS record (audio stream first, h264 `0/0` video later) is remuxed.
+- [ ] **Step 4: README.** In "Local copies of community plugins", change "These are unmodified community plugins" to say they are community plugins kept in `Local`, unmodified except where noted, and add to the Migz Remux row: "**Modified (v1.2.1):** also remuxes files Tdarr labels audio when ffprobe finds a real video stream, even if the container already matches (Tdarr labels a file audio when its video frame rate reads `0/0`, seen on some MPEG-TS captures); the remux re-derives the rate".
 - [ ] **Step 5:** `node --test tests/*.test.js` (fail 0). Commit the plugin, the test and README: "Remux MPEG-TS files that Tdarr labels audio".
 
 ### Task 2: Add Suffix keeps the real extension
@@ -53,7 +66,7 @@
 **Files:** Modify `Tdarr_Plugin_the1nk_add_suffix_to_filename.js`; create `tests/add_suffix.test.js`.
 
 - [ ] **Step 1: Failing tests** with a stubbed `fs` (`renameSync` records `[from, to]`), calling `plugin(file, {}, { suffix: ' (Tdarr)' }, {})`. Build expected paths with `path.join` / `path.dirname` so they hold on Windows too.
-  - `file = { _id: '/temp/w/Space King - S01E02 - House of a Thousand Furries.ts', fileNameWithoutExtension: 'Space King - S01E02 - House of a Thousand Furries', meta: { Directory: '/temp/w', FileTypeExtension: 'm2t' } }` → new `_id` `path.join('/temp/w', 'Space King - S01E02 - House of a Thousand Furries (Tdarr).ts')`, one rename from the old to the new path, `updateDB` true, infoLog contains `'extension is .ts'`.
+  - `file = { _id: '/temp/w/Space King - S01E02 - House of a Thousand Furries.ts', fileNameWithoutExtension: 'Space King - S01E02 - House of a Thousand Furries', meta: { Directory: '/temp/w', FileTypeExtension: 'm2t' } }` → new `_id` the literal `'/temp/w/Space King - S01E02 - House of a Thousand Furries (Tdarr).ts'`, one rename from the old to the new path, `updateDB` true, infoLog contains `'extension is .ts'`.
   - an `.mkv` with `FileTypeExtension: 'mkv'` → ends `' (Tdarr).mkv'`.
   - `fileNameWithoutExtension: 'Good Boy (2025) {imdb-tt35521922} ()'`, `_id` `'/m/Good Boy (2025) {imdb-tt35521922} ().mkv'` → `path.join('/m', 'Good Boy (2025) {imdb-tt35521922} (Tdarr).mkv')`.
   - already suffixed (`fileNameWithoutExtension` ends with `' (Tdarr)'`) → no rename, `updateDB` false.
@@ -61,10 +74,12 @@
 - [ ] **Step 3: Implement.** Require `path` next to `fs`, replace the `FileTypeExtension` log line with `response.infoLog += 'extension is ' + path.extname(fileNameOld) + '\r\n';`, and build the name as:
 
 ```js
-      // Folder and extension from the file's own path: ExifTool's FileTypeExtension calls MPEG-TS "m2t".
-      file._id = path.join(path.dirname(fileNameOld),
-        cleanName + (' ' + inputs.suffix).replace('  ', ' ') + path.extname(fileNameOld));
+      // Folder and extension from the file's own (POSIX) path: ExifTool's FileTypeExtension calls MPEG-TS "m2t".
+      file._id = path.posix.join(path.posix.dirname(fileNameOld),
+        cleanName + (' ' + inputs.suffix).replace('  ', ' ') + path.posix.extname(fileNameOld));
 ```
+
+  Use `path.posix.extname` in the `extension is` log line, and replace the `file.meta.Directory` log line with `'directory is ' + path.posix.dirname(fileNameOld)`, so a record without `meta` is still renamed. Tests assert literal POSIX strings and add: `Mr. Robot - S01E01.mkv` → `Mr. Robot - S01E01 (Tdarr).mkv`; `UPPER.MKV` → `UPPER (Tdarr).MKV`; a record without `meta` is renamed.
 
   Set `Version: "1.01"` and `Description: \`Adds a suffix to the filename, keeping the file's own extension\``.
 - [ ] **Step 4:** `node --test tests/*.test.js` (fail 0). Commit: "Keep the real extension when adding the filename suffix".

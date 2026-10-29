@@ -6,7 +6,7 @@ const details = () => ({
   Type: 'Video',
   Operation: 'Transcode',
   Description: 'Files will be remuxed into either mkv or mp4. \n\n'
-    + 'Local copy (the1nk): also treats a file as video when ffprobe finds a video stream that isn\'t cover art, because Tdarr labels MPEG-TS files "audio". \n\n',
+    + 'Local copy (the1nk): also treats a file as video when ffprobe finds a video stream that isn\'t cover art, because Tdarr labels a file audio when its video frame rate reads 0/0 (seen on some MPEG-TS captures); remuxing re-derives it. \n\n',
   Version: '1.2.1',
   Tags: 'pre-processing,ffmpeg,video only,configurable',
   Inputs: [{
@@ -73,8 +73,8 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   response.container = `.${inputs.container}`;
 
   // Check if file is a video. If it isn't then exit plugin.
-  // the1nk: Tdarr's scanner labels MPEG-TS (.ts) files "audio", so also trust a real (non-cover-art)
-  // video stream in ffprobe's data.
+  // the1nk: Tdarr labels a file "audio" when its video stream's average frame rate reads 0/0 (seen on some
+  // MPEG-TS captures), so also trust a real (non-cover-art) video stream in ffprobe's data.
   const probeStreams = (file.ffProbeData && file.ffProbeData.streams) || [];
   const hasVideoStream = probeStreams.some((s) => s.codec_type === 'video'
     && !(s.disposition && s.disposition.attached_pic));
@@ -134,7 +134,13 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   }
 
   // Check if file.container does NOT match inputs.container. If so remux file.
-  if (file.container !== inputs.container) {
+  // the1nk: a file Tdarr labels audio but that has a real video stream is remuxed even when the container
+  // already matches, which re-derives the frame rate so later steps see a video.
+  if (file.fileMedium !== 'video' && file.container === inputs.container) {
+    response.infoLog += '☒Tdarr labels this file audio (its video frame rate reads 0/0). Remuxing so later steps see a video. \n';
+    convert = true;
+    genpts = '-fflags +genpts';
+  } else if (file.container !== inputs.container) {
     response.infoLog += `☒File is ${file.container} but requested to be ${inputs.container} container. Remuxing. \n`;
     convert = true;
   } else if (file.container === inputs.container) {

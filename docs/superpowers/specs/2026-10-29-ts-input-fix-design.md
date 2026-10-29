@@ -6,7 +6,10 @@ Date: 2026-10-29
 
 Job `igcGl9O` (Space King S01E02, a `.ts` file) shows two faults:
 
-1. **Tdarr's scanner labels `.ts` files `fileMedium: "audio"`**, although ffprobe (`video/h264`),
+1. **Tdarr labels the file `fileMedium: "audio"`.** Its scanner does so when a file has an audio extension
+   or when no video stream has a usable average frame rate (`0/0`). Some MPEG-TS captures, such as the Space
+   King `.ts` files, probe that way; the container itself is not the cause, and normal `.ts` files are
+   labelled video. Yet ffprobe (`video/h264`),
    ExifTool (`video/mpeg`) and MediaInfo (`Video/AVC`) all see the video. Every community plugin that
    checks `file.fileMedium !== 'video'` skips the file: Migz Remux ("☒File is not a video"), Remove Data
    Streams, Migz Image Removal, Reorder Streams and H265 CPU Transcode. The file is never remuxed to
@@ -23,13 +26,17 @@ the `TDARR_DRC_PROCESSED` tag, so running them through the flow again would comp
 
 - **Migz Remux (local copy, `Tdarr_Plugin_MC93_Migz1Remux.js`, 1.2 → 1.2.1):** treat the file as video if
   `file.fileMedium === 'video'` **or** ffprobe lists a video stream that isn't cover art
-  (`codec_type === 'video'` and not `disposition.attached_pic`). Everything else is unchanged; it already
+  (`codec_type === 'video'` and not `disposition.attached_pic`). A file labelled audio that has such a stream
+  is remuxed even when its container already matches (an `.mkv` that probes `0/0`), with `-fflags +genpts`
+  and the log line "Tdarr labels this file audio (its video frame rate reads 0/0). Remuxing so later steps
+  see a video."; the remux re-derives the frame rate. Everything else is unchanged; it already
   adds `-fflags +genpts` for `ts` input. Once the working file is an MKV, Tdarr rescans it before each
   later plugin, and the rest of the flow sees a normal MKV video. The README's "Local copies of community
   plugins" section notes that this copy is now modified.
 - **Add Suffix (`Tdarr_Plugin_the1nk_add_suffix_to_filename.js`, 1.00 → 1.01):** take the folder and the
-  extension from the file's own path (`path.dirname`, `path.extname` of `file._id`) instead of
-  `file.meta.Directory` / `file.meta.FileTypeExtension`. The log shows the extension it used.
+  extension from the file's own path (`path.posix.dirname`, `path.posix.extname` of `file._id`; Tdarr paths
+  are POSIX) instead of `file.meta.Directory` / `file.meta.FileTypeExtension`, so a record without `meta`
+  is still renamed. The log shows the directory and extension it used.
 - **The seven existing files:** converted once, in the Tdarr node with the flow's own tools, after the
   fixes are deployed: `tdarr-ffmpeg -fflags +genpts -i X.m2t -map 0 -c copy -max_muxing_queue_size 9999
   -map -0:d -metadata TDARR_DRC_PROCESSED=1 X.mkv` (the Migz Remux preset plus the DRC tag the flow would

@@ -266,7 +266,7 @@ These are community plugins kept in `Local` so the flows reference a fixed versi
 | Plugin | Used for |
 |--------|----------|
 | `Tdarr_Plugin_00td_action_remove_stream_by_specified_property` | Drops `bmp` streams (`propertyToCheck=codec_name`, `valuesToRemove=bmp`) |
-| `Tdarr_Plugin_MC93_Migz1Remux` | Remuxes to MKV with `force_conform` (drops data / `mov_text` / `eia_608` / `timed_id3`). **Modified (v1.2.1):** also remuxes files Tdarr labels audio when ffprobe finds a real video stream (MPEG-TS `.ts` files) |
+| `Tdarr_Plugin_MC93_Migz1Remux` | Remuxes to MKV with `force_conform` (drops data / `mov_text` / `eia_608` / `timed_id3`). **Modified (v1.2.1):** also remuxes files Tdarr labels audio when ffprobe finds a real video stream, even if the container already matches (Tdarr labels a file audio when its video frame rate reads `0/0`, seen on some MPEG-TS captures); the remux re-derives the rate |
 | `Tdarr_Plugin_vdka_Remove_DataStreams` | Drops any remaining data streams |
 | `Tdarr_Plugin_MP01_MichPasCleanSubsAndAudioCodecs` | _Not used by any flow_ |
 

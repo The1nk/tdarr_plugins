@@ -49,14 +49,14 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     response.infoLog += 'suffix is ' + inputs.suffix + '\r\n';
     response.infoLog += 'fnwoExt is ' + file.fileNameWithoutExtension + '\r\n';
     response.infoLog += 'file._id is ' + file._id + '\r\n';
-    response.infoLog += 'file.meta.Directory is ' + file.meta.Directory + '\r\n';
-    response.infoLog += 'extension is ' + path.extname(fileNameOld) + '\r\n';
+    response.infoLog += 'directory is ' + path.posix.dirname(fileNameOld) + '\r\n';
+    response.infoLog += 'extension is ' + path.posix.extname(fileNameOld) + '\r\n';
 
     if (inputs.suffix !== '' && !file.fileNameWithoutExtension.endsWith(inputs.suffix)) {
       var cleanName = file.fileNameWithoutExtension.replace(/\s*\(\)\s*$/, '');
-      // Folder and extension from the file's own path: ExifTool's FileTypeExtension calls MPEG-TS "m2t".
-      file._id = path.join(path.dirname(fileNameOld),
-        cleanName + (' ' + inputs.suffix).replace('  ', ' ') + path.extname(fileNameOld));
+      // Folder and extension from the file's own (POSIX) path: ExifTool's FileTypeExtension calls MPEG-TS "m2t".
+      file._id = path.posix.join(path.posix.dirname(fileNameOld),
+        cleanName + (' ' + inputs.suffix).replace('  ', ' ') + path.posix.extname(fileNameOld));
     }
 
     if (fileNameOld != file._id) {
