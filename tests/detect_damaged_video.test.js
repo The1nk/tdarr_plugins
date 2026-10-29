@@ -31,6 +31,8 @@ test('parseTimes: sorts, drops packets without a timestamp, takes the first CSV 
   assert.deepStrictEqual(parseTimes('0.083000\r\n0.000000\r\nN/A\r\n0.042000,\r\n\r\n'), [0, 0.042, 0.083]);
   assert.deepStrictEqual(parseTimes(''), []);
   assert.deepStrictEqual(parseTimes(undefined), []);
+  assert.deepStrictEqual(parseTimes('nan\ninf\nInfinity\n-Infinity\nN/A\n0.5\n'), [0.5]);
+  assert.deepStrictEqual(parseTimes('0.042\n-0.042\n0\n'), [-0.042, 0, 0.042]);
 });
 
 test('findGaps: steady 24 fps with 41/42 ms steps has no gaps', () => {
@@ -63,11 +65,23 @@ test('findGaps: too few frames, duplicate timestamps, and ties', () => {
   assert.deepStrictEqual(findGaps([0, 0.04, 0.08, 0.13, 0.18]), { normal: 0.04, gaps: [], missing: 0 });
 });
 
+test('findGaps: an interval of exactly 1.5x normal is a gap', () => {
+  assert.deepStrictEqual(findGaps([0, 0.04, 0.08, 0.12, 0.18]),
+    { normal: 0.04, gaps: [{ at: 0.12, length: 0.06 }], missing: 0.02 });
+});
+
+test('findGaps: missing time is summed over all gaps', () => {
+  const g = findGaps(grid(0, 50).concat(grid(51, 120), grid(216, 240)));
+  assert.strictEqual(g.gaps.length, 2);
+  assert.ok(Math.abs(g.missing - 4.041) < 1e-9, String(g.missing));
+});
+
 test('clock: mm:ss under an hour, h:mm:ss from one hour, seconds rounded down', () => {
   assert.strictEqual(clock(0), '00:00');
   assert.strictEqual(clock(50.98), '00:50');
   assert.strictEqual(clock(75), '01:15');
   assert.strictEqual(clock(3725.9), '1:02:05');
+  assert.strictEqual(clock(3600), '1:00:00');
 });
 
 test('describeGaps: count, largest (first one on a tie), missing time', () => {
@@ -75,6 +89,8 @@ test('describeGaps: count, largest (first one on a tie), missing time', () => {
     '1 timing gap (largest 0.08s at 00:02), about 0.04s of video missing');
   assert.strictEqual(describeGaps({ gaps: [{ at: 10, length: 2 }, { at: 20, length: 2 }], missing: 3.916 }),
     '2 timing gaps (largest 2.00s at 00:10), about 3.9s of video missing');
+  assert.strictEqual(describeGaps({ gaps: [{ at: 10, length: 2 }], missing: 0.996 }),
+    '1 timing gap (largest 2.00s at 00:10), about 1.0s of video missing');
 });
 
 // The gaps measured in the old Space King S01E02 (first frame at 0.021 s).
@@ -102,6 +118,7 @@ test('pickFfprobe: bundled, then next to an absolute ffmpegPath, then PATH', () 
   const bundled = '/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe';
   assert.strictEqual(pickFfprobe('tdarr-ffmpeg', (p) => p === bundled, P), bundled);
   assert.strictEqual(pickFfprobe('/usr/lib/jellyfin-ffmpeg/ffmpeg', (p) => p === '/usr/lib/jellyfin-ffmpeg/ffprobe', P), '/usr/lib/jellyfin-ffmpeg/ffprobe');
+  assert.strictEqual(pickFfprobe('C:\\ff\\ffmpeg.exe', (p) => p === 'C:\\ff\\ffprobe.exe', path.win32), 'C:\\ff\\ffprobe.exe');
   assert.strictEqual(pickFfprobe('tdarr-ffmpeg', () => false, P), 'ffprobe');
   assert.strictEqual(pickFfprobe(undefined, () => false, P), 'ffprobe');
 });

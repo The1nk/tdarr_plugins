@@ -48,12 +48,14 @@ var pickVideo = function (streams) {
 var parseTimes = function (csv) {
   return String(csv || '').split(/\r?\n/)
     .map(function (line) { return line.split(',')[0].trim(); })
-    .filter(function (v) { return v !== '' && !isNaN(Number(v)); })
+    .filter(function (v) { return v !== ''; })
     .map(Number)
+    .filter(Number.isFinite)
     .sort(function (a, b) { return a - b; });
 };
 
-// normal: the most common interval between frames, to the millisecond (ties go to the shorter one).
+// normal: the most common interval between frames, to the millisecond (ties go to the shorter interval:
+// the keys are integers, so they are visited in ascending order and only a strictly higher count replaces the pick).
 // A gap is an interval of at least 1.5x normal: millisecond timebases make 24 fps alternate 41/42 ms,
 // so one lost frame shows as 83 ms, only 1.98x the 42 ms mode.
 // Each gap: at (seconds from the first frame, like a player clock) and length (seconds).
@@ -70,7 +72,7 @@ var findGaps = function (times) {
   var best = 0;
   Object.keys(counts).forEach(function (k) {
     var ms = Number(k);
-    if (counts[k] > best || (counts[k] === best && ms < normal)) { best = counts[k]; normal = ms; }
+    if (counts[k] > best) { best = counts[k]; normal = ms; }
   });
   var gaps = [];
   var missingMs = 0;
@@ -101,7 +103,7 @@ var plural = function (n, one, many) { return n + ' ' + (n === 1 ? one : many); 
 var describeGaps = function (g) {
   var largest = g.gaps.reduce(function (a, b) { return b.length > a.length ? b : a; });
   return plural(g.gaps.length, 'timing gap', 'timing gaps') + ' (largest ' + largest.length.toFixed(2) + 's at '
-    + clock(largest.at) + '), about ' + g.missing.toFixed(g.missing < 1 ? 2 : 1) + 's of video missing';
+    + clock(largest.at) + '), about ' + g.missing.toFixed(g.missing < 0.995 ? 2 : 1) + 's of video missing';
 };
 
 // --- end of the shared gap code ---

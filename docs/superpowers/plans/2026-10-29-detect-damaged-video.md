@@ -79,6 +79,8 @@ test('parseTimes: sorts, drops packets without a timestamp, takes the first CSV 
   assert.deepStrictEqual(parseTimes('0.083000\r\n0.000000\r\nN/A\r\n0.042000,\r\n\r\n'), [0, 0.042, 0.083]);
   assert.deepStrictEqual(parseTimes(''), []);
   assert.deepStrictEqual(parseTimes(undefined), []);
+  assert.deepStrictEqual(parseTimes('nan\ninf\nInfinity\n-Infinity\nN/A\n0.5\n'), [0.5]);
+  assert.deepStrictEqual(parseTimes('0.042\n-0.042\n0\n'), [-0.042, 0, 0.042]);
 });
 
 test('findGaps: steady 24 fps with 41/42 ms steps has no gaps', () => {
@@ -111,11 +113,23 @@ test('findGaps: too few frames, duplicate timestamps, and ties', () => {
   assert.deepStrictEqual(findGaps([0, 0.04, 0.08, 0.13, 0.18]), { normal: 0.04, gaps: [], missing: 0 });
 });
 
+test('findGaps: an interval of exactly 1.5x normal is a gap', () => {
+  assert.deepStrictEqual(findGaps([0, 0.04, 0.08, 0.12, 0.18]),
+    { normal: 0.04, gaps: [{ at: 0.12, length: 0.06 }], missing: 0.02 });
+});
+
+test('findGaps: missing time is summed over all gaps', () => {
+  const g = findGaps(grid(0, 50).concat(grid(51, 120), grid(216, 240)));
+  assert.strictEqual(g.gaps.length, 2);
+  assert.ok(Math.abs(g.missing - 4.041) < 1e-9, String(g.missing));
+});
+
 test('clock: mm:ss under an hour, h:mm:ss from one hour, seconds rounded down', () => {
   assert.strictEqual(clock(0), '00:00');
   assert.strictEqual(clock(50.98), '00:50');
   assert.strictEqual(clock(75), '01:15');
   assert.strictEqual(clock(3725.9), '1:02:05');
+  assert.strictEqual(clock(3600), '1:00:00');
 });
 
 test('describeGaps: count, largest (first one on a tie), missing time', () => {
@@ -123,6 +137,8 @@ test('describeGaps: count, largest (first one on a tie), missing time', () => {
     '1 timing gap (largest 0.08s at 00:02), about 0.04s of video missing');
   assert.strictEqual(describeGaps({ gaps: [{ at: 10, length: 2 }, { at: 20, length: 2 }], missing: 3.916 }),
     '2 timing gaps (largest 2.00s at 00:10), about 3.9s of video missing');
+  assert.strictEqual(describeGaps({ gaps: [{ at: 10, length: 2 }], missing: 0.996 }),
+    '1 timing gap (largest 2.00s at 00:10), about 1.0s of video missing');
 });
 
 // The gaps measured in the old Space King S01E02 (first frame at 0.021 s).
@@ -150,6 +166,7 @@ test('pickFfprobe: bundled, then next to an absolute ffmpegPath, then PATH', () 
   const bundled = '/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe';
   assert.strictEqual(pickFfprobe('tdarr-ffmpeg', (p) => p === bundled, P), bundled);
   assert.strictEqual(pickFfprobe('/usr/lib/jellyfin-ffmpeg/ffmpeg', (p) => p === '/usr/lib/jellyfin-ffmpeg/ffprobe', P), '/usr/lib/jellyfin-ffmpeg/ffprobe');
+  assert.strictEqual(pickFfprobe('C:\\ff\\ffmpeg.exe', (p) => p === 'C:\\ff\\ffprobe.exe', path.win32), 'C:\\ff\\ffprobe.exe');
   assert.strictEqual(pickFfprobe('tdarr-ffmpeg', () => false, P), 'ffprobe');
   assert.strictEqual(pickFfprobe(undefined, () => false, P), 'ffprobe');
 });
@@ -226,12 +243,14 @@ var pickVideo = function (streams) {
 var parseTimes = function (csv) {
   return String(csv || '').split(/\r?\n/)
     .map(function (line) { return line.split(',')[0].trim(); })
-    .filter(function (v) { return v !== '' && !isNaN(Number(v)); })
+    .filter(function (v) { return v !== ''; })
     .map(Number)
+    .filter(Number.isFinite)
     .sort(function (a, b) { return a - b; });
 };
 
-// normal: the most common interval between frames, to the millisecond (ties go to the shorter one).
+// normal: the most common interval between frames, to the millisecond (ties go to the shorter interval:
+// the keys are integers, so they are visited in ascending order and only a strictly higher count replaces the pick).
 // A gap is an interval of at least 1.5x normal: millisecond timebases make 24 fps alternate 41/42 ms,
 // so one lost frame shows as 83 ms, only 1.98x the 42 ms mode.
 // Each gap: at (seconds from the first frame, like a player clock) and length (seconds).
@@ -248,7 +267,7 @@ var findGaps = function (times) {
   var best = 0;
   Object.keys(counts).forEach(function (k) {
     var ms = Number(k);
-    if (counts[k] > best || (counts[k] === best && ms < normal)) { best = counts[k]; normal = ms; }
+    if (counts[k] > best) { best = counts[k]; normal = ms; }
   });
   var gaps = [];
   var missingMs = 0;
@@ -279,7 +298,7 @@ var plural = function (n, one, many) { return n + ' ' + (n === 1 ? one : many); 
 var describeGaps = function (g) {
   var largest = g.gaps.reduce(function (a, b) { return b.length > a.length ? b : a; });
   return plural(g.gaps.length, 'timing gap', 'timing gaps') + ' (largest ' + largest.length.toFixed(2) + 's at '
-    + clock(largest.at) + '), about ' + g.missing.toFixed(g.missing < 1 ? 2 : 1) + 's of video missing';
+    + clock(largest.at) + '), about ' + g.missing.toFixed(g.missing < 0.995 ? 2 : 1) + 's of video missing';
 };
 
 // --- end of the shared gap code ---
