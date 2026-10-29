@@ -19,7 +19,7 @@
 - How flows run classic plugins (Tdarr node, `FlowHelpers/1.0.0/classicPlugins.js`): `otherArguments` = `{ handbrakePath, ffmpegPath, mkvpropeditPath, originalLibraryFile, nodeHardwareType, pluginCycle, workerType, version, platform_arch_isdocker, cacheFilePath, job }`. If the result has `error`, the runner throws `Plugin <path> failed: <error>` and the job fails. `ffmpegPath` is `tdarr-ffmpeg` on this node; the bundled ffprobe is `/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe`.
 - Measured facts this plan relies on (Tdarr node, ffprobe/ffmpeg 7.1.4-Jellyfin):
   - `ffprobe -v error -select_streams <i> -count_frames -show_entries stream=nb_read_frames -of csv=p=0 -- <file>` decodes every frame, exits 0 even when the decoder reports errors, and prints one stderr line per decoder error. `ffmpeg -i f -f null -` is NOT usable: its null muxer prints "non monotonically increasing dts" lines for clean variable-rate MKVs.
-  - Fixture results (stable across runs; `-threads 1` only pins the encoded bytes, as a precaution, because the decode error count does not depend on decoder or encoder threading; measured on ffmpeg 7.1.4-Jellyfin): `clean.mkv` rate `24/1`; `steady.mkv` rate `72/5`, no gaps; `vfr.mkv` rate `72/5`, one 4042 ms gap after 4.958 s, 0 decode errors; `damaged.mkv` rate `72/5`, gaps of 83 ms at 4.917 s and 4000 ms at 5.000 s, 3 decode errors.
+  - Fixture results (stable across runs; `-threads 1` only pins the encoded bytes, as a precaution, because the decode error count does not depend on decoder or encoder threading; measured on ffmpeg 7.1.4-Jellyfin): `clean.mkv` rate `24/1`; `steady.mkv` rate `72/5`, no gaps; `vfr.mkv` rate `72/5`, one 4042 ms gap after 4.958 s, 0 decode errors; `damaged.mkv` rate `72/5`, gaps of 83 ms at 4.917 s and 4000 ms at 5.000 s, 3 decode errors. `near.mkv` (x264 at 24000/1001, remuxed by `mkvmerge --default-duration 0:23185/967p`) reads as `23185/967`, has steady timing, and repairs to `24000/1001` with 240 packets.
   - Flow JSON files use CRLF line endings except the final `}`, which ends with a bare `\n`. `JSON.stringify(obj, null, 2).replace(/\n/g, '\r\n') + '\n'` reproduces all ten files byte for byte.
 - The gap code (`parseTimes`, `findGaps`, `clock`, `plural`, `describeGaps`) must be **identical text** in both plugin files (each plugin stands alone). Tests compare the two copies' behaviour.
 
@@ -1088,7 +1088,8 @@ const otherArgs2 = Object.assign({}, otherArgs, { cacheFilePath: W('repaired.mkv
 fs.rmSync(WORK, { recursive: true, force: true });
 fs.mkdirSync(WORK, { recursive: true });
 try {
-  console.log('ffmpeg: ' + run(FFMPEG, ['-version']).stdout.split(/\r?\n/)[0]);
+  const ver = run(FFMPEG, ['-version']);
+  console.log('ffmpeg: ' + String(ver.stdout || ver.error).split(/\r?\n/)[0]);
 
   // The expected gap and error values below were measured on ffmpeg 7.1.4-Jellyfin. If Tdarr's ffmpeg changes,
   // re-measure them. Fixtures: -threads 1 only pins x264's output bytes, as a precaution; the decode error
@@ -1109,7 +1110,7 @@ try {
   // Steady near-miss: 24000/1001 video whose track rate mkvmerge relabels as 23185/967 (about 23.976 fps, nonstandard).
   ffmpeg(src('24000/1001').concat(x264, [W('ntsc.mkv')]));
   const mm = run('mkvmerge', ['-o', W('near.mkv'), '--default-duration', '0:23185/967p', W('ntsc.mkv')]);
-  assert.ok(mm.status <= 1, 'mkvmerge failed: ' + mm.stdout + mm.stderr);
+  assert.ok(!mm.error && (mm.status === 0 || mm.status === 1),'mkvmerge failed: ' + mm.stdout + mm.stderr);
 
   assert.strictEqual(rateOf(W('clean.mkv')), '24/1');
   assert.strictEqual(rateOf(W('near.mkv')), '23185/967');
@@ -1159,6 +1160,9 @@ try {
   assert.ok(fix.infoLog.includes('Near-miss frame rate 23185/967'), fix.infoLog);
   assert.ok(fix.infoLog.includes('Verified:'), fix.infoLog);
   assert.strictEqual(fix.file._id, W('repaired.mkv'));
+  assert.strictEqual(fix.processFile, false);
+  assert.strictEqual(fix.updateDB, false);
+  assert.strictEqual(fix.removeFromDB, false);
   assert.ok(fs.existsSync(W('repaired.mkv')), 'repaired file missing');
   assert.strictEqual(rateOf(W('repaired.mkv')), '24000/1001');
 
@@ -1189,7 +1193,7 @@ MSYS_NO_PATHCONV=1 docker exec tdarr-node node /tmp/itest/plugins/detect_damaged
 
 Expected: an `ffmpeg:` version line, then log lines for clean, steady, near, vfr and damaged, then `repair vfr.mkv` (gap guard) and `repair near.mkv` (a real repair, `Verified: 23185/967 -> 24000/1001 ... Lossless.`), and then `PASS`, exit code 0. On success the test deletes its own work files; on failure it prints `FAILED. Work files kept for inspection in /tmp/itest/work` and exits 1.
 
-If an assertion fails, do not edit the expected strings to match. Find out why the plugin's output differs from the measured fixture results in Background, and fix the cause.
+If an assertion fails, do not edit the expected strings to match. Find out why the plugin's output differs from the measured fixture results in Background, and fix the cause. The one exception: if the logged `ffmpeg:` version differs from 7.1.4-Jellyfin, re-measure the fixture values instead.
 
 - [ ] **Step 3: Clean up the container**
 

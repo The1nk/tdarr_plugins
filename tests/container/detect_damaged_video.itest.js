@@ -50,7 +50,8 @@ const otherArgs2 = Object.assign({}, otherArgs, { cacheFilePath: W('repaired.mkv
 fs.rmSync(WORK, { recursive: true, force: true });
 fs.mkdirSync(WORK, { recursive: true });
 try {
-  console.log('ffmpeg: ' + run(FFMPEG, ['-version']).stdout.split(/\r?\n/)[0]);
+  const ver = run(FFMPEG, ['-version']);
+  console.log('ffmpeg: ' + String(ver.stdout || ver.error).split(/\r?\n/)[0]);
 
   // The expected gap and error values below were measured on ffmpeg 7.1.4-Jellyfin. If Tdarr's ffmpeg changes,
   // re-measure them. Fixtures: -threads 1 only pins x264's output bytes, as a precaution; the decode error
@@ -71,7 +72,7 @@ try {
   // Steady near-miss: 24000/1001 video whose track rate mkvmerge relabels as 23185/967 (about 23.976 fps, nonstandard).
   ffmpeg(src('24000/1001').concat(x264, [W('ntsc.mkv')]));
   const mm = run('mkvmerge', ['-o', W('near.mkv'), '--default-duration', '0:23185/967p', W('ntsc.mkv')]);
-  assert.ok(mm.status <= 1, 'mkvmerge failed: ' + mm.stdout + mm.stderr);
+  assert.ok(!mm.error && (mm.status === 0 || mm.status === 1),'mkvmerge failed: ' + mm.stdout + mm.stderr);
 
   assert.strictEqual(rateOf(W('clean.mkv')), '24/1');
   assert.strictEqual(rateOf(W('near.mkv')), '23185/967');
@@ -121,6 +122,9 @@ try {
   assert.ok(fix.infoLog.includes('Near-miss frame rate 23185/967'), fix.infoLog);
   assert.ok(fix.infoLog.includes('Verified:'), fix.infoLog);
   assert.strictEqual(fix.file._id, W('repaired.mkv'));
+  assert.strictEqual(fix.processFile, false);
+  assert.strictEqual(fix.updateDB, false);
+  assert.strictEqual(fix.removeFromDB, false);
   assert.ok(fs.existsSync(W('repaired.mkv')), 'repaired file missing');
   assert.strictEqual(rateOf(W('repaired.mkv')), '24000/1001');
 
