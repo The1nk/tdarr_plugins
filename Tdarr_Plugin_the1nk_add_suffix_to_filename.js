@@ -8,8 +8,8 @@ const details = () => {
     Name: "Add suffix to filename",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Adds a suffix to the filename`,
-    Version: "1.00",
+    Description: `Adds a suffix to the filename, keeping the file's own extension`,
+    Version: "1.01",
     Tags: "post-processing",
     Inputs: [{
       name: 'suffix',
@@ -36,6 +36,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   inputs = lib.loadDefaultValues(inputs, details);
   try {
     var fs = require("fs");
+    var path = require("path");
     var fileNameOld = file._id;
 
     var response = {
@@ -49,11 +50,13 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     response.infoLog += 'fnwoExt is ' + file.fileNameWithoutExtension + '\r\n';
     response.infoLog += 'file._id is ' + file._id + '\r\n';
     response.infoLog += 'file.meta.Directory is ' + file.meta.Directory + '\r\n';
-    response.infoLog += 'file.meta.FileTypeExtension is ' + file.meta.FileTypeExtension + '\r\n';
+    response.infoLog += 'extension is ' + path.extname(fileNameOld) + '\r\n';
 
     if (inputs.suffix !== '' && !file.fileNameWithoutExtension.endsWith(inputs.suffix)) {
       var cleanName = file.fileNameWithoutExtension.replace(/\s*\(\)\s*$/, '');
-      file._id = file.meta.Directory + '/' + cleanName + (' ' + inputs.suffix).replace('  ', ' ') + '.' + file.meta.FileTypeExtension;
+      // Folder and extension from the file's own path: ExifTool's FileTypeExtension calls MPEG-TS "m2t".
+      file._id = path.join(path.dirname(fileNameOld),
+        cleanName + (' ' + inputs.suffix).replace('  ', ' ') + path.extname(fileNameOld));
     }
 
     if (fileNameOld != file._id) {
