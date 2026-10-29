@@ -34,12 +34,12 @@
 - [x] **Step 1: Write the failing tests** in `tests/check_video.test.js` (`node:test`, `node:assert`; it is the file in the repo). Require the tool from `path.join(__dirname, '..', 'tools', 'check-video.js')`. A fake runner `fake(cfg)` returns `async (cmd, args) => …` that records `[cmd, ...args]` and answers by argument: `-version` → status 0, the stream probe (`stream=index,codec_type,r_frame_rate:stream_disposition=attached_pic`), the listing (`packet=pts_time`) and the decode (`-count_frames`), each overridable. Defaults: one video stream at `7016/301`, a steady 24 fps listing (`grid`/`csv` helpers as in `tests/detect_damaged_video.test.js`), decode `{ status: 0, stdout: '144\n', stderr: '' }`. Cases:
 
   - `oneLine` (splits on \r\n, \r, \n; trims; drops empty lines; joins with ` | `); `capLabel` (`'256 MB'`, `'1000 bytes'`).
-  - `parseArgs`: defaults `{ all: false, jobs: 2, timeout: 120, ffprobe: 'ffprobe', paths: [], help: false }`; every option; the errors (`--jobs`/`-j` need a whole number of at least 1, `--timeout needs a whole number of minutes (0 = none)` for `-1`, `x`, `1.5` and a missing value, `--ffprobe needs a path`, `unknown option --bogus`); `--timeout 0`; `--`; `-h`/`--help`.
+  - `parseArgs`: defaults `{ all: false, jobs: 2, timeout: 120, ffprobe: 'ffprobe', paths: [], help: false }`; every option; the errors (`--jobs`/`-j` need a whole number of at least 1, `--timeout needs a whole number of minutes from 0 to 35791 (0 = none)` for `-1`, `x`, `1.5`, `35792`, `40000` and a missing value (`35791` is accepted), `--ffprobe needs a path` (also for a value starting with `-`), `unknown option --bogus`); `--timeout 0`; `--`; `-h`/`--help`.
   - `checkFile`: cover art only → skipped; standard rate → clean in 1 call (`--all` → 2 calls); odd rate steady → clean with the exact listing call; a 4 s hole → `vfr` with the exact decode call; the hole with decode errors → `damaged` with the plugin's text and `firstErrors`; cover art at index 0 → listing uses stream 1; the runner receives `{ timeoutMs: minutes * 60000 }`; every ffprobe failure text (exit, not started, no JSON, signal, too few timestamps, decode); `(timed out after 7 min)`; an overflowed call (`overflow: true`) is `(output cap): ffprobe output exceeded 1000 bytes`, not "not started"; multi-line stderr becomes one line.
   - `collectFiles` (real temp folders): extension filter and sort order, explicit files of any extension, missing path → `not found`, duplicates; paths normalised with `path.resolve` (mixed slashes, relative, case on Windows) and a file given directly and inside a given folder is listed once under its first spelling; a file and a symlink to it are listed once under the first spelling (`t.skip` if file links can't be created); a junction to another folder is followed and a junction back to the parent does not loop (`t.skip` if links can't be created); a folder whose `readdirSync` throws (`t.mock.method`) is a one-line problem and the rest is still collected.
   - `summarise`: the exact lines for damaged + errors + not-found paths (singular/plural), exit codes 1/3/0.
-  - `main` (fake runner, captured `out`/`err`): usage and exit 2/0; unknown option; unusable ffprobe (not started, exit) → exit 2, nothing else printed, only the `-version` call; no video files → 2; damaged → `Found 2 video files.`, tab-separated progress lines, summary, Damaged section, exit 1; `Found 1 video file.`; missing path → exit 3 and ` 1 path not found.`; unreadable file → exit 3 with a one-line detail; damaged beats errors; a runner that throws → `ERROR` line; the same file given three ways → 1; concurrency never exceeds `-j` (2 and 1); Ctrl+C (`deps.onInterrupt`/`deps.exit`/`deps.killChildren` stubs) prints `Interrupted.` and one summary, exits 130; a call that ends with status 3221225786 is not reported, whether it comes after the handler ran or before it (then the interrupt routine runs at once, and with `-j 2` a sibling worker's pending call is never printed: one exit 130, one summary); the handler kills the children in `liveChildren` (a `kill` spy).
-  - `runTool` (real Node child): status/stdout/stderr and a missing tool; a child killed by `timeoutMs: 200` has `timedOut` and a `signal`; a quick child is not timed out; output beyond `maxBytes: 1000` kills it with `error.message === 'ffprobe output exceeded 1000 bytes'` and `overflow: true` (stdout and stderr); exit status 3221225786 sets `interrupted` (Windows); `liveChildren` holds the child while it runs.
+  - `main` (fake runner, captured `out`/`err`): usage and exit 2/0; unknown option; unusable ffprobe (not started, exit) → exit 2, nothing else printed, only the `-version` call; no video files → 2; damaged → `Found 2 files to check.`, tab-separated progress lines, summary, Damaged section, exit 1; `Found 1 file to check.`; missing path → exit 3 and ` 1 path not found.`; unreadable file → exit 3 with a one-line detail; damaged beats errors; a runner that throws → `ERROR` line; the same file given three ways → 1; concurrency never exceeds `-j` (2 and 1); Ctrl+C (`deps.onInterrupt`/`deps.exit`/`deps.killChildren` stubs) prints `Interrupted.` and one summary, exits 130; a call that ends with status 3221225786 or signal SIGINT is not reported, whether it comes after the handler ran or before it (then the interrupt routine runs at once, and with `-j 2` a sibling worker's pending call is never printed: one exit 130, one summary); the handler kills the children in `liveChildren` (a `kill` spy).
+  - `runTool` (real Node child): status/stdout/stderr and a missing tool; a child killed by `timeoutMs: 200` has `timedOut` and a `signal`; a quick child is not timed out; output beyond `maxBytes: 1000` kills it with `error.message === 'ffprobe output exceeded 1000 bytes'` and `overflow: true` (stdout and stderr); exit status 3221225786 sets `interrupted` (Windows); `liveChildren` holds the child while it runs; `timeoutMs: 2 ** 31` means no timer; SIGINT marks `interrupted` (POSIX), a timeout does not.
 
 - [ ] **Step 2: Run them, see them fail** — `node --test tests/check_video.test.js` fails with `Cannot find module …tools/check-video.js`.
 
@@ -72,6 +72,9 @@ const MAX_BYTES = 256 * 1024 * 1024; // the plugin's maxBuffer
 const DEFAULT_TIMEOUT_MIN = 120;
 // Windows' exit status for a process ended by Ctrl+C (STATUS_CONTROL_C_EXIT).
 const CONTROL_C = 3221225786;
+// setTimeout fires at once beyond 2^31-1 ms, so --timeout stops there (about 35791 minutes).
+const MAX_TIMER_MS = 2147483647;
+const MAX_TIMEOUT_MIN = 35791;
 
 // The ffprobe processes running now, so Ctrl+C can stop them.
 const liveChildren = new Set();
@@ -132,10 +135,10 @@ const runTool = (cmd, args, opts) => new Promise((resolve) => {
   child.on('close', (status, signal) => {
     const r = { status, signal, stdout, stderr };
     if (timedOut) Object.assign(r, { signal: signal || 'SIGTERM', timedOut: true });
-    else if (status === CONTROL_C) r.interrupted = true;
+    else if (status === CONTROL_C || signal === 'SIGINT') r.interrupted = true;
     finish(r);
   });
-  if (o.timeoutMs > 0) {
+  if (o.timeoutMs > 0 && o.timeoutMs <= MAX_TIMER_MS) {
     timer = setTimeout(() => {
       timedOut = true;
       child.kill();
@@ -285,12 +288,12 @@ const parseArgs = (argv) => {
     } else if (a === '--timeout') {
       const raw = argv[++i];
       const n = raw === undefined || raw === '' ? NaN : Number(raw);
-      if (!Number.isInteger(n) || n < 0) {
-        return Object.assign(o, { error: '--timeout needs a whole number of minutes (0 = none)' });
+      if (!Number.isInteger(n) || n < 0 || n > MAX_TIMEOUT_MIN) {
+        return Object.assign(o, { error: '--timeout needs a whole number of minutes from 0 to ' + MAX_TIMEOUT_MIN + ' (0 = none)' });
       }
       o.timeout = n;
     } else if (a === '--ffprobe') {
-      if (argv[i + 1] === undefined) return Object.assign(o, { error: '--ffprobe needs a path' });
+      if (argv[i + 1] === undefined || argv[i + 1].startsWith('-')) return Object.assign(o, { error: '--ffprobe needs a path' });
       o.ffprobe = argv[++i];
     } else if (a === '--') {
       o.paths.push(...argv.slice(i + 1));
@@ -371,7 +374,7 @@ const main = async (argv, deps) => {
     d.err('No video files found.');
     return 2;
   }
-  d.out('Found ' + plural(files.length, 'video file') + '.');
+  d.out('Found ' + plural(files.length, 'file') + ' to check.');
 
   const results = problems.slice();
   let next = 0;
@@ -392,7 +395,7 @@ const main = async (argv, deps) => {
       let hit = false;
       const run = async (cmd, args, ropts) => {
         const res = await d.run(cmd, args, ropts);
-        if (res && (res.interrupted || res.status === CONTROL_C)) hit = true;
+        if (res && (res.interrupted || res.status === CONTROL_C || (res.signal === 'SIGINT' && !res.timedOut))) hit = true;
         return res;
       };
       let r;
@@ -453,7 +456,7 @@ Checks video files that are already in the library (or anywhere else) for missin
 node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <file or folder>...
 ```
 
-Folders are searched recursively for library video files (`mkv mp4 mov m4v mpg mpeg avi flv webm wmv vob evo m2ts m2t mts ts`); files named directly are checked whatever their extension. Links are followed (loops are detected), and a file given more than once is checked once. The tool prints `Found N video files.`, then one line per file as it finishes, `[i/n] LABEL   path<TAB>detail` (a tab, not " - ", separates the path from the detail, because library names contain " - "), then a summary line, then the damaged files (with the first decoder errors) and any errors again. Error details are always one line. Paths that do not exist are listed under Errors and counted separately (` 1 path not found.`). Press Ctrl+C to stop: it prints `Interrupted.` and the summary so far.
+Folders are searched recursively for library video files (`mkv mp4 mov m4v mpg mpeg avi flv webm wmv vob evo m2ts m2t mts ts`); files named directly are checked whatever their extension. Links are followed (loops are detected), and a file given more than once is checked once. The tool prints `Found N files to check.`, then one line per file as it finishes, `[i/n] LABEL   path<TAB>detail` (a tab, not " - ", separates the path from the detail, because library names contain " - "), then a summary line, then the damaged files (with the first decoder errors) and any errors again. Error details are always one line. Paths that do not exist are listed under Errors and counted separately (`1 path not found.`). Press Ctrl+C to stop: it prints `Interrupted.` and the summary so far.
 
 | Verdict | Meaning |
 |---------|---------|
@@ -467,10 +470,10 @@ Folders are searched recursively for library video files (`mkv mp4 mov m4v mpg m
 |--------|---------|-------------|
 | `--all` | off | also check the timing of files whose frame rate is standard (the plugin skips them; slower, but finds damage the plugin can't) |
 | `-j`, `--jobs` | `2` | files checked at once; every check reads the whole file, so a big library over the network takes hours |
-| `--timeout` | `120` | minutes after which one ffprobe call is given up on and the file is reported as an error (`0` = never) |
+| `--timeout` | `120` | minutes after which one ffprobe call is given up on and the file is reported as an error (`0` = never, at most `35791`) |
 | `--ffprobe` | `ffprobe` on PATH | the ffprobe to use; it is tried with `-version` first, and the tool stops with exit code `2` if it does not run |
 
-Exit code: `0` if nothing is damaged and nothing failed; `1` if any file is damaged; `3` if there were errors (including paths not found) but nothing is damaged; `2` for a usage error, when no video files were found, or when ffprobe does not run; `130` after Ctrl+C.
+Exit code: `0` if nothing is damaged and nothing failed; `1` if any file is damaged; `2` for a usage error, when no video files were found, or when ffprobe does not run; `3` if there were errors (including paths not found) but nothing is damaged; `130` after Ctrl+C. If the output is cut short (for example piped into `Select-Object -First N` or `head`), the tool exits quietly with code `0`, so don't rely on the exit code in that case.
 
 ---
 ```

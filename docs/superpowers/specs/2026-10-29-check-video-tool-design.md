@@ -51,11 +51,12 @@ node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <fil
   line) to stderr and exits 2, instead of reporting every file as an error.
 - **Concurrency:** `-j N` (default 2) files at once, using async `spawn` (each check reads the whole
   file, often over a network share).
-- **Timeout:** `--timeout MIN` (default 120, 0 = never; a whole number) kills one ffprobe call that runs
+- **Timeout:** `--timeout MIN` (default 120, 0 = never; a whole number from 0 to 35791, because
+  `setTimeout` fires at once beyond 2^31-1 ms; `runTool` also treats any larger `timeoutMs` as no timer) kills one ffprobe call that runs
   longer; the file is reported as an error `(timed out after N min)` and the scan goes on.
 - **Output cap:** each of an ffprobe call's output streams is capped at 256 MB (the plugin's
   `maxBuffer`). Beyond that the call is killed and the file is an error `(output cap): ffprobe output exceeded 256 MB`.
-- **Output:** `Found N video file(s).` after the folders are walked; then one line per file as it
+- **Output:** `Found N file(s) to check.` after the folders are walked (explicitly named files of any extension are counted too); then one line per file as it
   finishes, `[i/n] LABEL   path<TAB>detail` (label padded to 7; a tab, not " - ", separates path and
   detail because library names contain " - "); then a summary
   `Checked N file(s): C clean, V deliberate VFR, D damaged, E error(s), S skipped.`, with
@@ -67,14 +68,15 @@ node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <fil
   files were found, or when ffprobe is unusable; 130 after Ctrl+C.
 - **Ctrl+C:** on SIGINT during the checks it kills the ffprobe processes still running, prints
   `Interrupted.` and the summary of the results so far (same format), then exits 130. In a console
-  Ctrl+C also reaches ffprobe, which on Windows exits with status 3221225786 (`STATUS_CONTROL_C_EXIT`):
-  such a call is treated as an interrupt, not as an error. Its file is not recorded or printed, no new
-  file is started, and if node's own SIGINT handler has not run yet the same interrupt routine runs
+  Ctrl+C also reaches ffprobe, which on Windows exits with status 3221225786 (`STATUS_CONTROL_C_EXIT`),
+  and on POSIX it ends with SIGINT: such a call is treated as an interrupt, not as an error. Its file is
+  not recorded or printed, no new file is started, and if node's own SIGINT handler has not run yet the same interrupt routine runs
   at once (it kills the other workers' ffprobes, prints the summary, exits 130; it runs only once). The
   SIGINT listener is removed in a `finally`.
-- **Robustness:** if stdout is closed early (EPIPE, e.g. piped into `head`) it exits quietly; an
+- **Robustness:** if stdout is closed early (EPIPE, e.g. piped into `head`) it exits quietly with code 0 (so the exit code means nothing then); an
   unexpected exception prints its message to stderr and exits 2.
-- **ffprobe:** `--ffprobe <path>`, default `ffprobe` on PATH.
+- **ffprobe:** `--ffprobe <path>`, default `ffprobe` on PATH; a value starting with `-` is rejected
+  (`--ffprobe needs a path`).
 
 ## Testing
 

@@ -95,11 +95,17 @@ test('parseArgs: errors', () => {
   assert.strictEqual(parseArgs(['-j', 'x']).error, '-j needs a whole number of at least 1');
   assert.strictEqual(parseArgs(['--ffprobe']).error, '--ffprobe needs a path');
   assert.strictEqual(parseArgs(['--bogus']).error, 'unknown option --bogus');
-  const msg = '--timeout needs a whole number of minutes (0 = none)';
+  const msg = '--timeout needs a whole number of minutes from 0 to 35791 (0 = none)';
   assert.strictEqual(parseArgs(['--timeout', '-1']).error, msg);
   assert.strictEqual(parseArgs(['--timeout', 'x']).error, msg);
   assert.strictEqual(parseArgs(['--timeout', '1.5']).error, msg);
   assert.strictEqual(parseArgs(['--timeout']).error, msg);
+  assert.strictEqual(parseArgs(['--timeout', '35792']).error, msg);
+  assert.strictEqual(parseArgs(['--timeout', '40000']).error, msg);
+  assert.strictEqual(parseArgs(['--timeout', '35791']).timeout, 35791);
+  assert.strictEqual(parseArgs(['--timeout', '35791']).error, undefined);
+  assert.strictEqual(parseArgs(['--ffprobe', '-j', 'x']).error, '--ffprobe needs a path');
+  assert.strictEqual(parseArgs(['--ffprobe', '-x']).error, '--ffprobe needs a path');
 });
 
 test('parseArgs: -- ends the options, and help', () => {
@@ -401,7 +407,7 @@ test('main: reports damaged files and returns 1', async (t) => {
   const run = (cmd, args) => (args[args.length - 1] === b ? bad : base)(cmd, args);
   const c = capture(run);
   assert.strictEqual(await main([root], c.deps), 1);
-  assert.strictEqual(c.out[0], 'Found 2 video files.');
+  assert.strictEqual(c.out[0], 'Found 2 files to check.');
   assert.match(c.out[1], /^\[[12]\/2\] (CLEAN|DAMAGED) +.*[ab]\.mkv\t/);
   assert.match(c.out[2], /^\[[12]\/2\] (CLEAN|DAMAGED) +.*[ab]\.mkv\t/);
   const damagedLine = c.out.slice(1, 3).find((l) => l.includes('DAMAGED'));
@@ -424,7 +430,7 @@ test('main: one file is "Found 1 video file."; all clean returns 0', async (t) =
   fs.writeFileSync(path.join(root, 'a.mkv'), '');
   const c = capture(fake());
   assert.strictEqual(await main([root], c.deps), 0);
-  assert.strictEqual(c.out[0], 'Found 1 video file.');
+  assert.strictEqual(c.out[0], 'Found 1 file to check.');
   assert.ok(!c.out.includes('Damaged:'));
   assert.ok(c.out.includes('Checked 1 file: 1 clean, 0 deliberate VFR, 0 damaged, 0 errors, 0 skipped.'));
 });
@@ -485,7 +491,7 @@ test('main: the same file given twice is checked once', async (t) => {
   fs.writeFileSync(a, '');
   const c = capture(fake());
   assert.strictEqual(await main([a, root, a.split(path.sep).join('/')], c.deps), 0);
-  assert.strictEqual(c.out[0], 'Found 1 video file.');
+  assert.strictEqual(c.out[0], 'Found 1 file to check.');
 });
 
 test('main: -j limits how many files are checked at once', async (t) => {
@@ -571,6 +577,38 @@ test('main: a Ctrl+C status on one call interrupts at once, while a sibling call
   assert.strictEqual(probes, 2);
 });
 
+test('main: a call ended by SIGINT (POSIX Ctrl+C) is an interrupt, not an error', async (t) => {
+  const root = threeFiles(t);
+  const inner = fake();
+  let probes = 0;
+  const exits = [];
+  const run = async (cmd, args) => {
+    if (args.includes(PROBE_ARG) && ++probes === 2) return { status: null, signal: 'SIGINT', stdout: '', stderr: '' };
+    return inner(cmd, args);
+  };
+  const c = capture(run, { onInterrupt: () => () => {}, exit: (code) => exits.push(code), killChildren: () => {} });
+  assert.strictEqual(await main(['-j', '1', root], c.deps), 130);
+  assert.deepStrictEqual(exits, [130]);
+  assert.ok(!c.out.some((l) => l.includes('ERROR')), c.out.join(String.fromCharCode(10)));
+  assert.strictEqual(probes, 2);
+});
+
+test('runTool: a child ended by SIGINT is marked interrupted (POSIX)', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows has no SIGINT exit');
+    return;
+  }
+  const r = await runTool(process.execPath, ['-e', 'process.kill(process.pid, "SIGINT")']);
+  assert.strictEqual(r.signal, 'SIGINT');
+  assert.strictEqual(r.interrupted, true);
+});
+
+test('runTool: a timed-out child is not marked interrupted', async () => {
+  const r = await runTool(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { timeoutMs: 200 });
+  assert.strictEqual(r.timedOut, true);
+  assert.ok(!r.interrupted);
+});
+
 test('runTool: captures status and output; a missing tool sets error', async () => {
   const r = await runTool(process.execPath, ['-e', 'process.stdout.write("hi");process.stderr.write("e");process.exit(3)']);
   assert.strictEqual(r.status, 3);
@@ -588,6 +626,12 @@ test('runTool: kills a child that outlives the timeout', async () => {
   assert.strictEqual(r.timedOut, true);
   assert.ok(r.signal, 'signal is set');
   assert.ok(Date.now() - start < 8000);
+});
+
+test('runTool: a timeout beyond the timer limit means no timer', async () => {
+  const r = await runTool(process.execPath, ['-e', 'setTimeout(()=>{},300)'], { timeoutMs: 2 ** 31 });
+  assert.strictEqual(r.status, 0);
+  assert.ok(!r.timedOut);
 });
 
 test('runTool: a child that finishes in time is not marked timed out', async () => {

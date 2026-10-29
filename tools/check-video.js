@@ -24,6 +24,9 @@ const MAX_BYTES = 256 * 1024 * 1024; // the plugin's maxBuffer
 const DEFAULT_TIMEOUT_MIN = 120;
 // Windows' exit status for a process ended by Ctrl+C (STATUS_CONTROL_C_EXIT).
 const CONTROL_C = 3221225786;
+// setTimeout fires at once beyond 2^31-1 ms, so --timeout stops there (about 35791 minutes).
+const MAX_TIMER_MS = 2147483647;
+const MAX_TIMEOUT_MIN = 35791;
 
 // The ffprobe processes running now, so Ctrl+C can stop them.
 const liveChildren = new Set();
@@ -84,10 +87,10 @@ const runTool = (cmd, args, opts) => new Promise((resolve) => {
   child.on('close', (status, signal) => {
     const r = { status, signal, stdout, stderr };
     if (timedOut) Object.assign(r, { signal: signal || 'SIGTERM', timedOut: true });
-    else if (status === CONTROL_C) r.interrupted = true;
+    else if (status === CONTROL_C || signal === 'SIGINT') r.interrupted = true;
     finish(r);
   });
-  if (o.timeoutMs > 0) {
+  if (o.timeoutMs > 0 && o.timeoutMs <= MAX_TIMER_MS) {
     timer = setTimeout(() => {
       timedOut = true;
       child.kill();
@@ -237,12 +240,12 @@ const parseArgs = (argv) => {
     } else if (a === '--timeout') {
       const raw = argv[++i];
       const n = raw === undefined || raw === '' ? NaN : Number(raw);
-      if (!Number.isInteger(n) || n < 0) {
-        return Object.assign(o, { error: '--timeout needs a whole number of minutes (0 = none)' });
+      if (!Number.isInteger(n) || n < 0 || n > MAX_TIMEOUT_MIN) {
+        return Object.assign(o, { error: '--timeout needs a whole number of minutes from 0 to ' + MAX_TIMEOUT_MIN + ' (0 = none)' });
       }
       o.timeout = n;
     } else if (a === '--ffprobe') {
-      if (argv[i + 1] === undefined) return Object.assign(o, { error: '--ffprobe needs a path' });
+      if (argv[i + 1] === undefined || argv[i + 1].startsWith('-')) return Object.assign(o, { error: '--ffprobe needs a path' });
       o.ffprobe = argv[++i];
     } else if (a === '--') {
       o.paths.push(...argv.slice(i + 1));
@@ -323,7 +326,7 @@ const main = async (argv, deps) => {
     d.err('No video files found.');
     return 2;
   }
-  d.out('Found ' + plural(files.length, 'video file') + '.');
+  d.out('Found ' + plural(files.length, 'file') + ' to check.');
 
   const results = problems.slice();
   let next = 0;
@@ -344,7 +347,7 @@ const main = async (argv, deps) => {
       let hit = false;
       const run = async (cmd, args, ropts) => {
         const res = await d.run(cmd, args, ropts);
-        if (res && (res.interrupted || res.status === CONTROL_C)) hit = true;
+        if (res && (res.interrupted || res.status === CONTROL_C || (res.signal === 'SIGINT' && !res.timedOut))) hit = true;
         return res;
       };
       let r;

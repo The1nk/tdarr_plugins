@@ -288,9 +288,9 @@ Folders are searched recursively for library video files (`mkv mp4 mov m4v mpg m
 
 Output, in order:
 
-1. `Found N video files.`
+1. `Found N files to check.`
 2. One progress line per file as it finishes: `[i/n] LABEL   path<TAB>detail`. A tab, not " - ", separates the path from the detail, because library names contain " - ".
-3. A summary line, then the damaged files (with the first decoder errors) and any errors again. Error details are always one line. Paths that do not exist are listed under Errors and counted separately (` 1 path not found.`).
+3. A summary line, then the damaged files (with the first decoder errors) and any errors again. Error details are always one line. Paths that do not exist are listed under Errors and counted separately (`1 path not found.`).
 
 Scripts should parse the tab-separated progress lines, not the summary: the summary's Errors section uses `path: detail`, and Windows paths contain `:`.
 
@@ -308,16 +308,18 @@ Press Ctrl+C to stop: the tool prints `Interrupted.` and the summary so far.
 |--------|---------|-------------|
 | `--all` | off | also check the timing of files whose frame rate is standard (the plugin skips them; slower, but finds damage the plugin can't) |
 | `-j`, `--jobs` | `2` | files checked at once; every check reads the whole file, so a big library over the network takes hours |
-| `--timeout` | `120` | minutes after which one ffprobe call is given up on and the file is reported as an error (`0` = never). Raise it, or use `0`, for very long 4K files decoded over the network |
+| `--timeout` | `120` | minutes after which one ffprobe call is given up on and the file is reported as an error (`0` = never, at most `35791`). Raise it, or use `0`, for very long 4K files decoded over the network |
 | `--ffprobe` | `ffprobe` on PATH | the ffprobe to use; it is tried with `-version` first, and the tool stops with exit code `2` if it does not run |
 
 | Exit code | Meaning |
 |-----------|---------|
 | `0` | nothing is damaged and nothing failed |
 | `1` | any file is damaged |
-| `3` | there were errors (including paths not found) but nothing is damaged |
 | `2` | usage error, no video files found, or ffprobe does not run |
+| `3` | there were errors (including paths not found) but nothing is damaged |
 | `130` | stopped with Ctrl+C |
+
+If the output is cut short (for example piped into `Select-Object -First N` or `head`), the tool exits quietly with code `0`, so don't rely on the exit code in that case.
 
 ---
 

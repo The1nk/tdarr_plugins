@@ -66,7 +66,7 @@ their rate is non-standard. The decode reads and decodes the whole file, which c
 
 ## Components
 
-### 1. New plugin: `Tdarr_Plugin_the1nk_detect_damaged_video.js` (v1.00)
+### 1. New plugin: `Tdarr_Plugin_the1nk_detect_damaged_video.js` (v1.01)
 
 - `Stage: 'Pre-processing'`, `Type: 'Video'`, `Operation: 'Transcode'` (it sits in a "Run Classic
   Transcode Plugin" node like the rest of the flow; it never sets `processFile`), no inputs,
@@ -82,7 +82,7 @@ their rate is non-standard. The decode reads and decodes the whole file, which c
   5. Otherwise set `response.error`, which fails the job (Tdarr's classic-plugin runner throws
      `Plugin … failed: <error>`; Convert Unsupported Subtitles does the same). The message also goes
      to the info log, followed by `First decoder errors:` and up to 5 stderr lines, each on its own line
-     indented by two spaces, with the `[h264 @ 0x55d1ffc77a00] ` context rewritten to `h264: ` and each
+     indented by two spaces, with the `[h264 @ 0x55d1ffc77a00] ` context (on Windows the address has no `0x`: `[h264 @ 0000025e00d66440] `) rewritten to `h264: ` and each
      line cut to 200 characters. The error also carries the first line:
      `Damaged video: 1 timing gap (largest 1.29s at 14:53), about 1.3s of video missing, and 1 decode error. The source is missing frames; replace it with a clean copy. First error: h264: error while decoding MB 2 67, bytestream -8`
      (a real message, from Dr. STONE S01E03).

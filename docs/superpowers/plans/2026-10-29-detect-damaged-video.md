@@ -1370,7 +1370,7 @@ Insert directly before the line ``#### `Tdarr_Plugin_the1nk_convert_unsupported_
 
 ```markdown
 #### `Tdarr_Plugin_the1nk_detect_damaged_video`
-**Detect Damaged Video** — v1.00
+**Detect Damaged Video** — v1.01
 
 Fails the job when the source video is missing frames, so a damaged download never replaces the library file. The known case is downloads with whole seconds of video cut out: the player freezes on the last frame until the next one arrives, and the frame rate comes out odd (a 24 fps episode missing 209 frames reported `7016/301` = 23.309 fps).
 
