@@ -14,7 +14,7 @@ Module._load = function (request, parent, isMain) {
   return origLoad.call(this, request, parent, isMain);
 };
 
-const suffix = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_add_suffix_to_filename.js'));
+const suffix = require(path.join(__dirname, '..', 'plugins', 'Tdarr_Plugin_the1nk_add_suffix_to_filename.js'));
 
 const run = (file) => {
   const renames = [];

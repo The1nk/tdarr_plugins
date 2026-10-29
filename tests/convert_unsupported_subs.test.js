@@ -15,7 +15,7 @@ Module._load = function (request, parent, isMain) {
   return origLoad.call(this, request, parent, isMain);
 };
 
-const pluginModule = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'));
+const pluginModule = require(path.join(__dirname, '..', 'plugins', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'));
 const {
   findUnreadableSubs, planTracks, buildMerge, toolFailed, cueStats, verifyOutput, pickFfprobe,
   vttProblem, packetCount, sumPacketCsv, comparesBytes, readTrackEntries, mapTracks, filtersBlankBlocks,
@@ -1076,7 +1076,7 @@ test('plugin: no duration in the probe data and ffprobe returns nothing: the job
 test('source files contain no raw invisible characters (BOM, NBSP, zero-width, bidi marks)', () => {
   const fs = require('fs');
   const invisible = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u00a0\u00ad\u200b-\u200f\u2028-\u202f\u2060-\u2064\ufeff]/;
-  [path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'), __filename].forEach((f) => {
+  [path.join(__dirname, '..', 'plugins', 'Tdarr_Plugin_the1nk_convert_unsupported_subs.js'), __filename].forEach((f) => {
     fs.readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
       assert.ok(!invisible.test(line), path.basename(f) + ':' + (i + 1) + ' has a raw invisible character; use an escape');
     });

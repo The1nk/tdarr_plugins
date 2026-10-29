@@ -1,3 +1,7 @@
 path.env
 bash.exe.stackdump
 *.local.json
+
+# In Tdarr's plugins folder but not kept in this repo (unused by the flows); pull.ps1 brings them back.
+plugins/Tdarr_Plugin_MP01_MichPasCleanSubsAndAudioCodecs.js
+plugins/Tdarr_Plugin_the1nk_break_hardlink.js

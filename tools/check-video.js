@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const rules = require('../Tdarr_Plugin_the1nk_detect_damaged_video.js')._test;
+const rules = require('../plugins/Tdarr_Plugin_the1nk_detect_damaged_video.js')._test;
 
 // The libraries' container filter without disc images, plus the other MPEG-TS extensions.
 const EXTENSIONS = ['mkv', 'mp4', 'mov', 'm4v', 'mpg', 'mpeg', 'avi', 'flv', 'webm', 'wmv', 'vob', 'evo',

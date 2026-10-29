@@ -15,7 +15,7 @@ Module._load = function (request, parent, isMain) {
   return origLoad.call(this, request, parent, isMain);
 };
 
-const pluginModule = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_detect_damaged_video.js'));
+const pluginModule = require(path.join(__dirname, '..', 'plugins', 'Tdarr_Plugin_the1nk_detect_damaged_video.js'));
 const {
   parseTimes, findGaps, clock, describeGaps, damagedMessage, countLines, firstErrors, tail, pickFfprobe, pickVideo,
 } = pluginModule._test;

@@ -16,8 +16,8 @@ Module._load = function (request, parent, isMain) {
   return origLoad.call(this, request, parent, isMain);
 };
 
-const repair = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_repair_framerate.js'));
-const detect = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_detect_damaged_video.js'));
+const repair = require(path.join(__dirname, '..', 'plugins', 'Tdarr_Plugin_the1nk_repair_framerate.js'));
+const detect = require(path.join(__dirname, '..', 'plugins', 'Tdarr_Plugin_the1nk_detect_damaged_video.js'));
 
 // 24 fps timestamps at a 1 ms timebase (41/42 ms steps, like Matroska), frames [from, to).
 const grid = (from, to) => {
@@ -180,7 +180,7 @@ test('repair: an ffprobe failure in the verification gate is reported with its s
 // Each plugin file must stand alone, so the gap code exists twice. Both copies must agree.
 test('shared gap code: the source text of both copies is identical', () => {
   const extract = (file) => {
-    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8').replace(/\r\n/g, '\n');
+    const text = fs.readFileSync(path.join(__dirname, '..', 'plugins', file), 'utf8').replace(/\r\n/g, '\n');
     const from = text.search(/^\/\/ --- Gaps in the frame timing/m);
     const endMark = '// --- end of the shared gap code ---';
     const to = text.indexOf(endMark);

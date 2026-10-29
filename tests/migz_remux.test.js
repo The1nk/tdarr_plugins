@@ -12,7 +12,7 @@ Module._load = function (request, parent, isMain) {
   return origLoad.call(this, request, parent, isMain);
 };
 
-const migz = require(path.join(__dirname, '..', 'Tdarr_Plugin_MC93_Migz1Remux.js'));
+const migz = require(path.join(__dirname, '..', 'plugins', 'Tdarr_Plugin_MC93_Migz1Remux.js'));
 
 const run = (file) => migz.plugin(file, {}, { container: 'mkv', force_conform: true }, {});
 const video = (extra) => Object.assign({ codec_type: 'video', codec_name: 'h264', disposition: { attached_pic: 0 } }, extra);
