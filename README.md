@@ -24,7 +24,8 @@ flowchart TD
     f1 -- already suffixed --> stop([End])
     f1 -- continue --> f2{{Processed Tag Filter}}
     f2 -- has TDARR_PROCESSED --> stop
-    f2 -- continue --> t1[Convert Unsupported Subtitles<br/>WebVTT to SRT]
+    f2 -- continue --> t0[Detect Damaged Video]
+    t0 --> t1[Convert Unsupported Subtitles<br/>WebVTT to SRT]
     t1 --> t2[Remove Streams By Property<br/>codec_name = bmp]
     t2 --> t3[Migz Remux Container<br/>mkv, force_conform]
     t3 --> t4[Remove Data Streams]
@@ -46,7 +47,8 @@ Both outputs of every transcode node ("processed" / "not processed") lead to the
 ### Ordering rules
 
 - **Inside a flow, a classic plugin sees the current _working_ file.** After any FFmpeg step, that file is a temp copy in Tdarr's cache directory (`file._id` and `file.meta.Directory` point there), not the file in your library.
-- **Convert Unsupported Subtitles goes _first_, before any FFmpeg step.** Every later step copies all streams (`-map 0 -c copy`), and FFmpeg can't copy a track it can't read, so a single WebVTT track stored as `S_TEXT/WEBVTT` fails the whole flow with `Subtitle codec 0 is not supported`.
+- **Detect Damaged Video goes _first_.** It fails the job before any work is done on a file that is missing frames. It must come before H265 CPU Transcode in any case: a re-encode keeps the timing gaps but writes a clean stream, which hides the decoder errors the check relies on.
+- **Convert Unsupported Subtitles comes next, before any FFmpeg step.** Every later step copies all streams (`-map 0 -c copy`), and FFmpeg can't copy a track it can't read, so a single WebVTT track stored as `S_TEXT/WEBVTT` fails the whole flow with `Subtitle codec 0 is not supported`.
 - **Repair Frame Rate goes _after_ H265 CPU Transcode.** It's the last step that touches video, so the repair can't be undone by a later FFmpeg pass.
 - **mkvpropedit runs twice, both times as `refresh_only`.** FFmpeg copies existing statistics unchanged onto the streams it re-encodes, so a re-encoded video can claim its old H.264 bitrate. The first run comes after DRC and Reorder, just before H265 CPU Transcode, so its `max_bitrate` check reads up-to-date `BPS` values. The second run comes after the last step that changes the file (x265 / Repair Frame Rate), so the final file's statistics match its streams.
 - **Nothing edits the library file in place.** Radarr and Sonarr hardlink imports to the torrent client's copies, so an in-place edit would also change the seeding torrent. Every step before Replace Original File writes to the Tdarr cache; mkvpropedit `refresh_only` refuses to touch the original; and Add Suffix only renames. That's why the flows don't need Break Hardlink, which used to cost a full copy of every file.
@@ -120,6 +122,27 @@ Already-processed files are skipped via a `TDARR_DRC_PROCESSED` metadata tag.
 
 ---
 
+#### `Tdarr_Plugin_the1nk_detect_damaged_video`
+**Detect Damaged Video** — v1.00
+
+Fails the job when the source video is missing frames, so a damaged download never replaces the library file. The known case is downloads with whole seconds of video cut out: the player freezes on the last frame until the next one arrives, and the frame rate comes out odd (a 24 fps episode missing 209 frames reported `7016/301` = 23.309 fps).
+
+- **Gate:** only files whose video frame rate is not a standard one (`24000/1001`, `24/1`, `25/1`, `30000/1001`, `30/1`, `50/1`, `60000/1001`, `60/1`, `24000/1000`). Everything else passes through without being read.
+- **Timing gaps:** ffprobe lists the video packet timestamps. The normal interval is the most common one; any interval of at least 1.5× normal is a gap. If ffprobe lists fewer than 2 usable timestamps, the job fails.
+- **Decoder errors:** only when there are gaps, ffprobe decodes the video once (`-count_frames`, with repeated errors each counted) and counts the decoder errors. Frames cut out of the stream leave later frames pointing at pictures that no longer exist ("Missing reference picture"). Decoding reads the whole file, so on a file with gaps this step can take a few minutes.
+
+| Gaps | Decoder errors | Result |
+|------|----------------|--------|
+| none | (not checked) | continues |
+| yes | none | continues: the file was made variable-frame-rate on purpose (a still scene stored as one long frame) |
+| yes | yes | **job fails**, e.g. `Damaged video: 7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy.` |
+
+The file is only read, never changed. If ffprobe can't run or fails, the job fails too, because passing the file unchecked would defeat the check; the error shows the last 20 lines (at most 2000 characters) of ffprobe's output. It uses Tdarr's bundled ffprobe, else one next to an absolute `ffmpegPath`, else `ffprobe` on PATH. Damage cut cleanly at keyframes leaves no decoder errors and isn't detected; neither is damage in a file whose rate is still standard. In a flow, put it **first** (see [Ordering rules](#ordering-rules)).
+
+No inputs.
+
+---
+
 #### `Tdarr_Plugin_the1nk_convert_unsupported_subs`
 **Convert Unsupported Subtitles** — v1.06 _(flow-only)_
 
@@ -130,20 +153,21 @@ Fixes MKVs with subtitle tracks that FFmpeg can't read (ffprobe reports no codec
 - **Dropped (logged):** WebVTT tracks with no cue text, any other unreadable subtitle track, and Matroska track types that aren't video, audio or subtitles (e.g. DVD buttons), which mkvmerge can't carry.
 - **Verify:** track layout, codecs and the converted tracks' language, name and flags; every subtitle readable; cue counts (WebVTT, SRT and muxed track) compared like with like; an exact packet count for every kept track (PCM by exact payload bytes; kept SRT/ASCII text tracks allow for mkvmerge dropping blocks made only of spaces, tabs and line breaks; NBSP, form feed and vertical tab count as text); and duration sanity. If any check fails, the job fails with the reason and the library file is never touched.
 
-The plugin runs mkvtoolnix itself and passes the new file to the next flow node by changing `file._id`, so it only works inside a flow (it needs `cacheFilePath`). It needs `mkvmerge` and `mkvextract` (mkvtoolnix) and ffprobe (Tdarr's bundled copy, else one next to an absolute `ffmpegPath`, else on PATH), all present in the Tdarr node image. In a flow, put it **first** (see [Ordering rules](#ordering-rules)).
+The plugin runs mkvtoolnix itself and passes the new file to the next flow node by changing `file._id`, so it only works inside a flow (it needs `cacheFilePath`). It needs `mkvmerge` and `mkvextract` (mkvtoolnix) and ffprobe (Tdarr's bundled copy, else one next to an absolute `ffmpegPath`, else on PATH), all present in the Tdarr node image. In a flow, put it right after Detect Damaged Video, before any FFmpeg step (see [Ordering rules](#ordering-rules)).
 
 No inputs.
 
 ---
 
 #### `Tdarr_Plugin_the1nk_repair_framerate`
-**Repair Near-Miss Frame Rate** — v1.01 _(flow-only)_
+**Repair Near-Miss Frame Rate** — v1.02 _(flow-only)_
 
 Fixes MKVs that stutter on the Fire TV 4K Max because their declared frame rate is a *near-miss* of a standard one (e.g. `23185/967`, `22178/925`, `21171/883`, all ≈23.976 but not exact). This is the flow version of `Repair-FrameRate.ps1` from the Movie framerate fixer scripts:
 
 - **Gate:** MKV only, and the video rate must be non-standard but within `max_delta_fps` of a standard rate. Real odd rates like `500/21` or `1000/33` play fine and are left alone, because changing them would change playback speed.
+- **Gaps:** the video packet timestamps are listed first (the plugin also checks first that it runs in a flow, i.e. has a `cacheFilePath`). If the timing has gaps (frames missing; the same 1.5× rule as Detect Damaged Video), the file is skipped and the gaps are logged: a constant rate would close them by sliding the video out of sync with the audio. If ffprobe lists fewer than 2 usable timestamps, the timing can't be checked and the repair is skipped too.
 - **Repair:** `mkvmerge --default-duration <track>:<nearest standard>p --fix-bitstream-timing-information <track>:1`. Streams are copied: no re-encode, and tags, attachments and chapters are kept.
-- **Verify:** the rate must be corrected; codec, pixel format and video packet count must be unchanged; and duration must be within 1s. If any check fails, the repaired file is deleted and the original continues down the flow untouched.
+- **Verify:** the rate must be corrected; codec, pixel format and video packet count must be unchanged; and duration must be within 1s (the same video stream the gap check used is probed). If any check fails, the repaired file is deleted and the original continues down the flow untouched.
 
 The plugin runs mkvmerge itself and passes the repaired file to the next flow node by changing `file._id`, so it only works inside a flow. It finds `mkvmerge` next to `mkvpropedit`, and uses Tdarr's bundled ffprobe (`/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe`) or `ffprobe` on PATH. If mkvmerge can't be run, it logs that and skips the repair.
 
@@ -272,5 +296,16 @@ MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_convert_unsupported_subs.js tda
 MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_downmix_to_stereo_and_apply_DRC.js tdarr-node:/tmp/itest/plugins/Local/
 MSYS_NO_PATHCONV=1 docker cp tests/container/convert_unsupported_subs.itest.js tdarr-node:/tmp/itest/plugins/
 MSYS_NO_PATHCONV=1 docker exec tdarr-node node /tmp/itest/plugins/convert_unsupported_subs.itest.js "<source mkv under /media>"
+MSYS_NO_PATHCONV=1 docker exec tdarr-node rm -rf /tmp/itest
+```
+
+Integration test for `Tdarr_Plugin_the1nk_detect_damaged_video` and Repair Frame Rate's gap check, run inside the `tdarr-node` container. It builds five 10-second test videos with `tdarr-ffmpeg` (clean; steady at an odd rate; a steady near-miss, `23185/967`; variable-frame-rate on purpose; frames cut out of the stream) and checks each verdict and message exactly. It also checks that Repair Frame Rate still repairs the near-miss file, with the real mkvmerge. It logs the ffmpeg version; the expected values were measured on 7.1.4-Jellyfin, so re-measure them if Tdarr's ffmpeg changes. It needs no media and only writes under `/tmp/itest`. Pass a real damaged file under `/media` as an extra argument to check that it's reported as damaged too:
+
+```bash
+MSYS_NO_PATHCONV=1 docker exec tdarr-node sh -c 'rm -rf /tmp/itest && mkdir -p /tmp/itest/plugins/Local && ln -s /app/Tdarr_Node/assets/app/plugins/methods /tmp/itest/plugins/methods'
+MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_detect_damaged_video.js tdarr-node:/tmp/itest/plugins/Local/
+MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_repair_framerate.js tdarr-node:/tmp/itest/plugins/Local/
+MSYS_NO_PATHCONV=1 docker cp tests/container/detect_damaged_video.itest.js tdarr-node:/tmp/itest/plugins/
+MSYS_NO_PATHCONV=1 docker exec tdarr-node node /tmp/itest/plugins/detect_damaged_video.itest.js ["<damaged file under /media>"]
 MSYS_NO_PATHCONV=1 docker exec tdarr-node rm -rf /tmp/itest
 ```
