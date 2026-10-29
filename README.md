@@ -274,6 +274,53 @@ These are unmodified community plugins kept in `Local` so the flows reference a 
 
 ---
 
+## Tools
+
+### `tools/check-video.js`
+
+Checks video files that are already in the library (or anywhere else) for missing frames, with exactly the rules of [Detect Damaged Video](#tdarr_plugin_the1nk_detect_damaged_video): it loads that plugin and runs the same ffprobe checks. Run it on any PC with Node.js and ffprobe:
+
+```bash
+node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <file or folder>...
+```
+
+Folders are searched recursively for library video files (`mkv mp4 mov m4v mpg mpeg avi flv webm wmv vob evo m2ts m2t mts ts`); files named directly are checked whatever their extension. Links are followed (loops are detected), and a file given more than once is checked once.
+
+Output, in order:
+
+1. `Found N video files.`
+2. One progress line per file as it finishes: `[i/n] LABEL   path<TAB>detail`. A tab, not " - ", separates the path from the detail, because library names contain " - ".
+3. A summary line, then the damaged files (with the first decoder errors) and any errors again. Error details are always one line. Paths that do not exist are listed under Errors and counted separately (` 1 path not found.`).
+
+Scripts should parse the tab-separated progress lines, not the summary: the summary's Errors section uses `path: detail`, and Windows paths contain `:`.
+
+Press Ctrl+C to stop: the tool prints `Interrupted.` and the summary so far.
+
+| Verdict | Meaning |
+|---------|---------|
+| `CLEAN` | standard frame rate, or steady timing |
+| `VFR` | timing gaps, but the video decodes cleanly: variable frame rate on purpose |
+| `DAMAGED` | timing gaps and decoder errors: frames are missing; replace the file |
+| `ERROR` | ffprobe couldn't read, list or decode the file, or timed out, or the output was too large |
+| `SKIPPED` | no video stream |
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--all` | off | also check the timing of files whose frame rate is standard (the plugin skips them; slower, but finds damage the plugin can't) |
+| `-j`, `--jobs` | `2` | files checked at once; every check reads the whole file, so a big library over the network takes hours |
+| `--timeout` | `120` | minutes after which one ffprobe call is given up on and the file is reported as an error (`0` = never). Raise it, or use `0`, for very long 4K files decoded over the network |
+| `--ffprobe` | `ffprobe` on PATH | the ffprobe to use; it is tried with `-version` first, and the tool stops with exit code `2` if it does not run |
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | nothing is damaged and nothing failed |
+| `1` | any file is damaged |
+| `3` | there were errors (including paths not found) but nothing is damaged |
+| `2` | usage error, no video files found, or ffprobe does not run |
+| `130` | stopped with Ctrl+C |
+
+---
+
 ## Deployment
 
 See [`CLAUDE.md`](CLAUDE.md) for deployment instructions (push/pull scripts).
@@ -287,6 +334,8 @@ Unit tests (no Tdarr or media tools needed):
 ```bash
 node --test tests/*.test.js
 ```
+
+The unit tests include `tests/check_video.test.js`, which covers [`tools/check-video.js`](#toolscheck-videojs).
 
 Integration test for `Tdarr_Plugin_the1nk_convert_unsupported_subs`, run inside the `tdarr-node` container against a real file with an `S_TEXT/WEBVTT` subtitle track. It reproduces the production failure on that file, converts it, and shows the DRC step then succeeds. It only writes under `/tmp/itest` in the container. Stage it, run it (a few minutes on a large file) and clean up from the repo root in Git Bash (`MSYS_NO_PATHCONV` stops container paths being rewritten):
 
