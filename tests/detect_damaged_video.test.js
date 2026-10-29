@@ -17,7 +17,7 @@ Module._load = function (request, parent, isMain) {
 
 const pluginModule = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_detect_damaged_video.js'));
 const {
-  parseTimes, findGaps, clock, describeGaps, damagedMessage, countLines, pickFfprobe, pickVideo,
+  parseTimes, findGaps, clock, describeGaps, damagedMessage, countLines, tail, pickFfprobe, pickVideo,
 } = pluginModule._test;
 
 // 24 fps timestamps at a 1 ms timebase (41/42 ms steps, like Matroska), frames [from, to).
@@ -113,6 +113,13 @@ test('countLines: one per non-empty stderr line', () => {
   assert.strictEqual(countLines(undefined), 0);
 });
 
+test('tail: short text is unchanged; long text keeps the last 20 lines and 2000 characters', () => {
+  assert.strictEqual(tail('a\nb\n'), 'a\nb');
+  const lines = Array.from({ length: 25 }, (_, n) => 'line ' + (n + 1));
+  assert.strictEqual(tail(lines.join('\n')), '(5 earlier lines left out) ' + lines.slice(5).join('\n'));
+  assert.strictEqual(tail('x'.repeat(3000) + 'y'.repeat(2000)), 'y'.repeat(2000));
+});
+
 test('pickFfprobe: bundled, then next to an absolute ffmpegPath, then PATH', () => {
   const P = path.posix;
   const bundled = '/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe';
@@ -140,7 +147,7 @@ const csv = (times) => times.map((t) => t.toFixed(6)).join('\n') + '\n';
 const steady = csv(grid(0, 240));
 const holed = csv(grid(0, 120).concat(grid(216, 240)));
 const LIST_ARGS = ['-v', 'error', '-select_streams', '0', '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', '--', '/m/a.mkv'];
-const DECODE_ARGS = ['-v', 'error', '-select_streams', '0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', '/m/a.mkv'];
+const DECODE_ARGS = ['-v', 'repeat+error', '-select_streams', '0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', '/m/a.mkv'];
 
 const run = (cfg) => {
   const c = Object.assign({
@@ -226,10 +233,58 @@ test('plugin: a failed timestamp listing fails the job', () => {
 
 test('plugin: ffprobe that cannot be started fails the job', () => {
   const { res } = run({ listing: { error: new Error('spawnSync ffprobe ENOENT'), status: null, signal: null } });
-  assert.match(res.error, /^Detect damaged video: ffprobe could not list the video timestamps \(.*\): spawnSync ffprobe ENOENT$/);
+  assert.strictEqual(res.error, 'Detect damaged video: ffprobe could not list the video timestamps (not started): spawnSync ffprobe ENOENT');
 });
 
 test('plugin: a killed decode fails the job', () => {
   const { res } = run({ listing: { status: 0, stdout: holed, stderr: '' }, decode: { status: null, signal: 'SIGKILL', stdout: '', stderr: '' } });
   assert.strictEqual(res.error, 'Detect damaged video: ffprobe could not decode the video (signal SIGKILL): signal SIGKILL');
+});
+
+test('plugin: listing with no usable timestamps fails the job instead of passing as steady', () => {
+  const { res, calls } = run({ listing: { status: 0, stdout: 'N/A\nN/A\n', stderr: '' } });
+  assert.strictEqual(res.error, 'Detect damaged video: ffprobe listed no usable video timestamps (0 found)');
+  assert.strictEqual(calls.length, 1);
+});
+
+test('plugin: long tool output in an error is cut to its last 20 lines', () => {
+  const stderr = Array.from({ length: 30 }, (_, n) => 'err ' + (n + 1)).join('\n');
+  const { res } = run({ listing: { status: 1, stdout: '', stderr } });
+  assert.ok(res.error.includes('(10 earlier lines left out) err 11\n'));
+  assert.ok(res.error.endsWith('err 30'));
+});
+
+test('plugin: without a numeric stream index, selects v:<video streams before it>', () => {
+  const { calls } = run({ streams: [
+    { codec_type: 'video', r_frame_rate: '90000/1', disposition: { attached_pic: 1 } },
+    { codec_type: 'video', r_frame_rate: '7016/301' },
+  ] });
+  assert.deepStrictEqual(calls[0].slice(3, 5), ['-select_streams', 'v:1']);
+});
+
+test('plugin: a decode that exits non-zero fails the job', () => {
+  const { res } = run({ listing: { status: 0, stdout: holed, stderr: '' }, decode: { status: 1, stdout: '', stderr: 'boom' } });
+  assert.strictEqual(res.error, 'Detect damaged video: ffprobe could not decode the video (exit 1): boom');
+});
+
+test('plugin: works without otherArguments, using ffprobe from PATH', () => {
+  const seen = {};
+  stubs = {
+    fs: { existsSync: () => false },
+    child_process: { spawnSync: (cmd) => { seen.cmd = cmd; return { status: 0, stdout: steady, stderr: '' }; } },
+  };
+  try {
+    const file = { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: [{ index: 0, codec_type: 'video', r_frame_rate: '7016/301' }] } };
+    const res = pluginModule.plugin(file, {}, {}, undefined);
+    assert.strictEqual(res.error, undefined);
+    assert.strictEqual(seen.cmd, 'ffprobe');
+    assert.match(res.infoLog, /steady/);
+  } finally {
+    stubs = null;
+  }
+});
+
+test('plugin: a missing frame rate is labelled unknown', () => {
+  const { res } = run({ streams: [{ index: 0, codec_type: 'video' }] });
+  assert.strictEqual(res.infoLog, 'Frame rate unknown is not standard, but the frame timing is steady (no gaps). Continuing.\r\n');
 });

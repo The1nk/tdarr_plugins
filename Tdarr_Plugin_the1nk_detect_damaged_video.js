@@ -8,7 +8,7 @@ const details = () => {
     Name: "Detect damaged video",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe, and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing and the error count. The file is only read, never changed.`,
+    Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe, and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing and the error count. The file is only read, never changed. Decoding reads the whole file, so on a file with gaps this step can take a few minutes.`,
     Version: "1.00",
     Tags: "pre-processing,ffprobe,video only",
     Inputs: [],
@@ -118,6 +118,15 @@ var countLines = function (text) {
   return String(text || '').split(/\r?\n/).filter(function (line) { return line.trim() !== ''; }).length;
 };
 
+// Last 20 non-empty lines and at most 2000 characters of tool output, so an error or log stays readable.
+var tail = function (text) {
+  var lines = String(text || '').split(/\r?\n/).filter(function (line) { return line.trim() !== ''; });
+  var dropped = Math.max(0, lines.length - 20);
+  var out = lines.slice(dropped).join('\n');
+  if (out.length > 2000) out = out.slice(-2000);
+  return (dropped ? '(' + dropped + ' earlier lines left out) ' : '') + out;
+};
+
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 var plugin = function (file, librarySettings, inputs, otherArguments) {
   var lib = require('../methods/lib')();
@@ -142,8 +151,11 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
   var run = function (cmd, args) {
     return spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   };
-  var exitOf = function (r) { return r.signal ? 'signal ' + r.signal : 'exit ' + r.status; };
-  var why = function (r) { return r.error ? r.error.message : (r.stderr || r.stdout || exitOf(r)); };
+  var exitOf = function (r) {
+    if (r.signal) return 'signal ' + r.signal;
+    return r.error && r.status == null ? 'not started' : 'exit ' + r.status;
+  };
+  var why = function (r) { return tail(r.error ? r.error.message : (r.stderr || r.stdout || exitOf(r))); };
 
   try {
     var video = pickVideo(file.ffProbeData && file.ffProbeData.streams);
@@ -151,29 +163,40 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
       response.infoLog += 'No video stream found, skipping.\r\n';
       return response;
     }
-    var rate = video.r_frame_rate;
+    var rate = video.r_frame_rate || 'unknown';
     if (STD.indexOf(rate) !== -1) {
       response.infoLog += 'Frame rate already standard (' + rate + '), skipping.\r\n';
       return response;
     }
 
     var ffprobe = pickFfprobe((otherArguments || {}).ffmpegPath, fs.existsSync);
-    var stream = typeof video.index === 'number' ? String(video.index) : 'v:0';
+    var stream;
+    if (typeof video.index === 'number') {
+      stream = String(video.index);
+    } else {
+      // ffprobe's v:N counts cover art too.
+      var before = file.ffProbeData.streams.slice(0, file.ffProbeData.streams.indexOf(video));
+      stream = 'v:' + before.filter(function (s) { return s.codec_type === 'video'; }).length;
+    }
 
     var list = run(ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
       '-of', 'csv=p=0', '--', file._id]);
     if (list.error || list.status !== 0) {
       throw new Error('ffprobe could not list the video timestamps (' + exitOf(list) + '): ' + why(list));
     }
-    var g = findGaps(parseTimes(list.stdout));
+    var times = parseTimes(list.stdout);
+    if (times.length < 2) {
+      throw new Error('ffprobe listed no usable video timestamps (' + times.length + ' found)');
+    }
+    var g = findGaps(times);
     if (!g.gaps.length) {
       response.infoLog += 'Frame rate ' + rate + ' is not standard, but the frame timing is steady (no gaps). Continuing.\r\n';
       return response;
     }
 
-    // Decode every frame. ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a
+    // Decode every frame (repeat+ keeps ffmpeg from folding repeated errors into "Last message repeated N times"). ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a
     // variable-rate file's timestamps: every stderr line is a decoder error.
-    var dec = run(ffprobe, ['-v', 'error', '-select_streams', stream, '-count_frames',
+    var dec = run(ffprobe, ['-v', 'repeat+error', '-select_streams', stream, '-count_frames',
       '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', file._id]);
     if (dec.error || dec.status !== 0) {
       throw new Error('ffprobe could not decode the video (' + exitOf(dec) + '): ' + why(dec));
@@ -211,4 +234,5 @@ module.exports._test = {
   describeGaps: describeGaps,
   damagedMessage: damagedMessage,
   countLines: countLines,
+  tail: tail,
 };
