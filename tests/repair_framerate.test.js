@@ -153,6 +153,30 @@ test('repair: the verification gate probes the same video stream the gap check u
   probes.forEach((x) => assert.strictEqual(x[x.indexOf('-select_streams') + 1], '1'));
 });
 
+test('repair: an ffprobe failure in the verification gate is reported with its status and trimmed text', () => {
+  stubs = {
+    fs: { existsSync: (p) => p === '/w/a.mkv', unlinkSync: () => {} },
+    child_process: {
+      spawnSync: (cmd, args) => {
+        if (args.includes('packet=pts_time')) return { status: 0, stdout: csv(grid(0, 240)), stderr: '' };
+        if (cmd === 'mkvmerge' && args[0] === '-J') return { status: 0, stdout: JSON.stringify({ tracks: [{ id: 0, type: 'video' }] }), stderr: '' };
+        if (cmd === 'mkvmerge') return { status: 0, stdout: '', stderr: '' };
+        if (args.includes('-count_packets')) return { status: 1, stdout: '', stderr: 'bad file\n' };
+        throw new Error('unexpected call: ' + cmd);
+      },
+    },
+  };
+  let res;
+  try {
+    const file = { _id: '/m/a.mkv', file: '/m/a.mkv', container: 'mkv',
+      ffProbeData: { streams: [{ index: 0, codec_type: 'video', r_frame_rate: '23185/967' }] } };
+    res = repair.plugin(file, {}, { max_delta_fps: 0.05 }, { cacheFilePath: '/w/a.mkv', mkvpropeditPath: 'mkvpropedit' });
+  } finally {
+    stubs = null;
+  }
+  assert.ok(res.infoLog.includes('Error: ffprobe failed on /m/a.mkv (exit 1): bad file. Original left untouched.'), res.infoLog);
+});
+
 // Each plugin file must stand alone, so the gap code exists twice. Both copies must agree.
 test('shared gap code: the source text of both copies is identical', () => {
   const extract = (file) => {

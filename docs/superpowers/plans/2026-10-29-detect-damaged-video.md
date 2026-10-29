@@ -825,6 +825,30 @@ test('repair: the verification gate probes the same video stream the gap check u
   probes.forEach((x) => assert.strictEqual(x[x.indexOf('-select_streams') + 1], '1'));
 });
 
+test('repair: an ffprobe failure in the verification gate is reported with its status and trimmed text', () => {
+  stubs = {
+    fs: { existsSync: (p) => p === '/w/a.mkv', unlinkSync: () => {} },
+    child_process: {
+      spawnSync: (cmd, args) => {
+        if (args.includes('packet=pts_time')) return { status: 0, stdout: csv(grid(0, 240)), stderr: '' };
+        if (cmd === 'mkvmerge' && args[0] === '-J') return { status: 0, stdout: JSON.stringify({ tracks: [{ id: 0, type: 'video' }] }), stderr: '' };
+        if (cmd === 'mkvmerge') return { status: 0, stdout: '', stderr: '' };
+        if (args.includes('-count_packets')) return { status: 1, stdout: '', stderr: 'bad file\n' };
+        throw new Error('unexpected call: ' + cmd);
+      },
+    },
+  };
+  let res;
+  try {
+    const file = { _id: '/m/a.mkv', file: '/m/a.mkv', container: 'mkv',
+      ffProbeData: { streams: [{ index: 0, codec_type: 'video', r_frame_rate: '23185/967' }] } };
+    res = repair.plugin(file, {}, { max_delta_fps: 0.05 }, { cacheFilePath: '/w/a.mkv', mkvpropeditPath: 'mkvpropedit' });
+  } finally {
+    stubs = null;
+  }
+  assert.ok(res.infoLog.includes('Error: ffprobe failed on /m/a.mkv (exit 1): bad file. Original left untouched.'), res.infoLog);
+});
+
 // Each plugin file must stand alone, so the gap code exists twice. Both copies must agree.
 test('shared gap code: the source text of both copies is identical', () => {
   const extract = (file) => {
@@ -916,10 +940,7 @@ In `Tdarr_Plugin_the1nk_repair_framerate.js`:
     var list = spawnSync(ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
       '-of', 'csv=p=0', '--', file._id], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
     if (list.error || list.status !== 0) {
-      throw new Error('ffprobe could not list the video timestamps ('
-        + (list.error && list.status === null && !list.signal ? 'not started'
-          : list.signal ? 'signal ' + list.signal : 'exit ' + list.status) + '): '
-        + String(list.error ? list.error.message : (list.stderr || list.stdout || 'no output')).trim().slice(-2000));
+      throw new Error('ffprobe could not list the video timestamps (' + failureText(list));
     }
     var times = parseTimes(list.stdout);
     if (times.length < 2) {
@@ -949,6 +970,20 @@ In `Tdarr_Plugin_the1nk_repair_framerate.js`:
     var info = function (p) {
       var j = probe(['-select_streams', stream, '-count_packets',
 ```
+
+(c3) The guard and the verification gate share one helper for failed ffprobe runs. Directly before `var outPath = '';` add:
+
+```js
+  // Rest of a failed spawnSync message, after the opening "(": "<status>): <trimmed output>".
+  var failureText = function (r) {
+    return (r.error && r.status === null && !r.signal ? 'not started'
+      : r.signal ? 'signal ' + r.signal : 'exit ' + r.status) + '): '
+      + String(r.error ? r.error.message : (r.stderr || r.stdout || 'no output')).trim().slice(-2000);
+  };
+
+```
+
+The guard's error then reads `throw new Error('ffprobe could not list the video timestamps (' + failureText(list));` (already so in the block above). In the verification gate's `probe`, replace the `throw new Error('ffprobe failed on ' + p + ': ' + ...)` with `throw new Error('ffprobe failed on ' + p + ' (' + failureText(r));`.
 
 (d) At the end of the file, after `module.exports.plugin = plugin;`, add:
 

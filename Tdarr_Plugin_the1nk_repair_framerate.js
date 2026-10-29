@@ -125,6 +125,13 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     FFmpegMode: false,
   };
 
+  // Rest of a failed spawnSync message, after the opening "(": "<status>): <trimmed output>".
+  var failureText = function (r) {
+    return (r.error && r.status === null && !r.signal ? 'not started'
+      : r.signal ? 'signal ' + r.signal : 'exit ' + r.status) + '): '
+      + String(r.error ? r.error.message : (r.stderr || r.stdout || 'no output')).trim().slice(-2000);
+  };
+
   var outPath = '';
   var cleanup = function () {
     if (outPath && fs.existsSync(outPath)) {
@@ -192,10 +199,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     var list = spawnSync(ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
       '-of', 'csv=p=0', '--', file._id], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
     if (list.error || list.status !== 0) {
-      throw new Error('ffprobe could not list the video timestamps ('
-        + (list.error && list.status === null && !list.signal ? 'not started'
-          : list.signal ? 'signal ' + list.signal : 'exit ' + list.status) + '): '
-        + String(list.error ? list.error.message : (list.stderr || list.stdout || 'no output')).trim().slice(-2000));
+      throw new Error('ffprobe could not list the video timestamps (' + failureText(list));
     }
     var times = parseTimes(list.stdout);
     if (times.length < 2) {
@@ -255,7 +259,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     // --- verification gate ---
     var probe = function (args, p) {
       var r = spawnSync(ffprobe, ['-v', 'error'].concat(args, ['--', p]), { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
-      if (r.error || r.status !== 0) throw new Error('ffprobe failed on ' + p + ': ' + (r.error ? r.error.message : r.stderr));
+      if (r.error || r.status !== 0) throw new Error('ffprobe failed on ' + p + ' (' + failureText(r));
       return JSON.parse(r.stdout);
     };
     // Same selector for source and output: mkvmerge keeps the track order, so it names the same video in both.
