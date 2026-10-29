@@ -141,7 +141,9 @@ stream, hiding the decode errors, and failing early wastes no work.
 - **Integration test** `tests/container/detect_damaged_video.itest.js`, run inside the `tdarr-node`
   container like the existing one, with real Tdarr `methods/lib`, ffmpeg, ffprobe and mkvtoolnix. It
   builds its own fixtures under `/tmp/itest` with `tdarr-ffmpeg`, so it needs no media. x264 runs
-  with `-threads 1` so the output (and the decode error count) is the same every run. The gappy
+  with `-threads 1`, which only pins the encoded bytes as a precaution (the decode error count does not
+  depend on threading). The expected gap and error values were measured on ffmpeg 7.1.4-Jellyfin and
+  need re-measuring if Tdarr's ffmpeg changes; the test logs the ffmpeg version line at the start. The gappy
   files go through MP4 first, which gives them an odd frame rate (`72/5`) like the real downloads:
   - *clean*: 10 s of `testsrc2` at 24 fps, H.264 → `24/1` → detector skips (standard rate).
   - *steady*: `testsrc2` at `72/5` → odd rate, no gaps → detector continues.
@@ -149,11 +151,18 @@ stream, hiding the decode errors, and failing early wastes no work.
     (`-fps_mode passthrough`) → one 4.04 s gap, clean decode → detector continues and logs VFR;
     Repair Frame Rate run on it with `max_delta_fps: 10` (so `72/5` counts as a near-miss of
     `24000/1001`) → skips with the gap message and writes no output.
+  - *near-miss (positive control)*: `testsrc2` at `24000/1001` relabelled by
+    `mkvmerge --default-duration 0:23185/967p` → `r_frame_rate` `23185/967`, no gaps → detector
+    continues ("steady"); Repair Frame Rate with `max_delta_fps: 0.05` really repairs it with the real
+    mkvmerge: no error, `Near-miss frame rate 23185/967` and `Verified:` in the log, output file with
+    `r_frame_rate` `24000/1001`.
   - *damaged*: the clean encode (`-g 240`) stream-copied through the `noise` bitstream filter
     dropping packets 120–215 → 2 gaps (largest 4.00 s at 00:05), 3 decode errors → detector fails
     with the exact damaged message.
   - Optional argument: a real file under `/media`; if given, it must be reported as damaged (useful
     for the current Space King E02 until it is replaced).
+- The test cleans its work files on success and keeps them (printing `FAILED. Work files kept for
+  inspection in …`, exit 1) on failure, like the existing integration test.
 - README "Tests" section gains the stage/run/clean-up commands for the new integration test.
 
 ## Documentation
