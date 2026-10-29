@@ -48,6 +48,21 @@
       }
     },
     {
+      "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_detect_damaged_video",
+      "sourceRepo": "Community",
+      "pluginName": "runClassicTranscodePlugin",
+      "version": "2.0.0",
+      "inputsDB": {
+        "pluginSourceId": "Local:Tdarr_Plugin_the1nk_detect_damaged_video"
+      },
+      "fpEnabled": true,
+      "id": "YwFbZ0VewT",
+      "position": {
+        "x": -231.2889211707028,
+        "y": -163.08388975391858
+      }
+    },
+    {
       "name": "Run Classic Transcode Plugin: Tdarr_Plugin_the1nk_convert_unsupported_subs",
       "sourceRepo": "Community",
       "pluginName": "runClassicTranscodePlugin",
@@ -59,7 +74,7 @@
       "id": "RW_D2A0-xt",
       "position": {
         "x": -231.2889211707028,
-        "y": -163.08388975391858
+        "y": -63.083889753918584
       }
     },
     {
@@ -76,7 +91,7 @@
       "id": "itSxdiWDRf",
       "position": {
         "x": -231.2889211707028,
-        "y": -63.083889753918584
+        "y": 36.916110246081416
       }
     },
     {
@@ -92,7 +107,7 @@
       "id": "P6W_UVFxmH",
       "position": {
         "x": -231.2889211707028,
-        "y": 36.916110246081416
+        "y": 136.91611024608142
       }
     },
     {
@@ -107,7 +122,7 @@
       "id": "_l6G9yeWv9V",
       "position": {
         "x": -231.2889211707028,
-        "y": 136.91611024608142
+        "y": 236.91611024608142
       }
     },
     {
@@ -122,7 +137,7 @@
       "id": "I3T0Fe4oQAK",
       "position": {
         "x": -231.2889211707028,
-        "y": 236.91611024608142
+        "y": 336.9161102460814
       }
     },
     {
@@ -137,7 +152,7 @@
       "id": "gSNBjsTJ-In",
       "position": {
         "x": -231.2889211707028,
-        "y": 336.9161102460814
+        "y": 436.9161102460814
       }
     },
     {
@@ -152,7 +167,7 @@
       "id": "RpOXxjTXcrM",
       "position": {
         "x": -231.2889211707028,
-        "y": 436.9161102460814
+        "y": 536.9161102460814
       }
     },
     {
@@ -168,7 +183,7 @@
       "id": "W1Uq7cYumf8",
       "position": {
         "x": -231.2889211707028,
-        "y": 536.9161102460814
+        "y": 636.9161102460814
       }
     },
     {
@@ -186,7 +201,7 @@
       "id": "E01mNnTIRCX",
       "position": {
         "x": -231.2889211707028,
-        "y": 636.9161102460814
+        "y": 736.9161102460814
       }
     },
     {
@@ -201,7 +216,7 @@
       "id": "ivMLlG5Cowu",
       "position": {
         "x": -231.2889211707028,
-        "y": 736.9161102460814
+        "y": 836.9161102460814
       }
     },
     {
@@ -217,7 +232,7 @@
       "id": "506yAbWWi2p",
       "position": {
         "x": -231.2889211707028,
-        "y": 836.9161102460814
+        "y": 936.9161102460814
       }
     },
     {
@@ -232,7 +247,7 @@
       "id": "r27vUw7R0IL",
       "position": {
         "x": -231.2889211707028,
-        "y": 936.9161102460814
+        "y": 1036.9161102460814
       }
     },
     {
@@ -248,7 +263,7 @@
       "id": "SRslneNMUJq",
       "position": {
         "x": -231.2889211707028,
-        "y": 1136.9161102460814
+        "y": 1236.9161102460814
       }
     },
     {
@@ -265,7 +280,7 @@
       "id": "g_rzsNmT5ia",
       "position": {
         "x": -231.2889211707028,
-        "y": 1236.9161102460814
+        "y": 1336.9161102460814
       }
     },
     {
@@ -278,7 +293,7 @@
       "id": "tmWd0LVcD",
       "position": {
         "x": -231.2889211707028,
-        "y": 1036.9161102460814
+        "y": 1136.9161102460814
       }
     }
   ],
@@ -300,7 +315,7 @@
     {
       "source": "Lmv6wwEIAy",
       "sourceHandle": "1",
-      "target": "RW_D2A0-xt",
+      "target": "YwFbZ0VewT",
       "targetHandle": null,
       "id": "78gDe4MhR4"
     },
@@ -492,6 +507,20 @@
       "target": "itSxdiWDRf",
       "targetHandle": null,
       "id": "RuQwDux0Lc"
+    },
+    {
+      "source": "YwFbZ0VewT",
+      "sourceHandle": "1",
+      "target": "RW_D2A0-xt",
+      "targetHandle": null,
+      "id": "P_8xOGutkQ"
+    },
+    {
+      "source": "YwFbZ0VewT",
+      "sourceHandle": "2",
+      "target": "RW_D2A0-xt",
+      "targetHandle": null,
+      "id": "wv-4G_sDpz"
     }
   ]
 }
