@@ -47,9 +47,13 @@ Two signals, both required:
    24 fps file alternate 41/42 ms, so one missing frame shows as 83 ms, only 1.98× the 42 ms mode.
    For each gap record its start (relative to the first packet, so it matches the player clock), its
    length, and its *excess* (length minus the normal interval). Total missing time = sum of excesses.
-2. **Decode errors.** Decode the same video stream once:
-   `ffmpeg -v error -i <file> -map 0:<index> -f null -`. Every non-empty stderr line counts as one
-   error. A deliberately held frame decodes cleanly; frames cut from the bitstream do not.
+2. **Decode errors.** Decode the same video stream once with ffprobe:
+   `ffprobe -v error -select_streams <index> -count_frames -show_entries stream=nb_read_frames -of csv=p=0 -- <file>`.
+   Every non-empty stderr line counts as one error. A deliberately held frame decodes cleanly; frames
+   cut from the bitstream do not. Not `ffmpeg … -f null -`: its null muxer prints "non monotonically
+   increasing dts" for every few frames of a variable-rate MKV (58 lines on a clean test file), which
+   would flag good files. ffprobe has no muxer, exits 0 on decode errors, and printed 0 lines for the
+   clean variable-rate file and 3 decoder errors for the damaged one (measured in the Tdarr node).
 
 | Gaps | Decode errors | Verdict |
 |------|---------------|---------|
@@ -75,13 +79,16 @@ their rate is non-standard.
      `24000/1001, 24/1, 25/1, 30000/1001, 30/1, 50/1, 60000/1001, 60/1, 24000/1000`) → log, continue.
   3. Timestamp listing → gaps. No gaps → log "timing is steady", continue.
   4. Decode → error count. Zero → log that the gaps decode cleanly (deliberate VFR), continue.
-  5. Otherwise **throw**, which fails the job (same mechanism as Break Hardlink). Message:
-     `Damaged video: 7 timing gaps (largest 4.00s at 00:50), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy.`
-     Position format `mm:ss`, or `h:mm:ss` from one hour.
-- Tools: ffprobe found the same way as Convert Unsupported Subtitles (bundled ffprobe, then one next
-  to an absolute `ffmpegPath`, then PATH); ffmpeg is `otherArguments.ffmpegPath || 'ffmpeg'`.
-- If ffprobe or ffmpeg cannot run or exits non-zero, the job **fails** with that tool's error. The
-  check is only reached for non-standard-rate files, and passing them unchecked would defeat it.
+  5. Otherwise set `response.error`, which fails the job (Tdarr's classic-plugin runner throws
+     `Plugin … failed: <error>`; Convert Unsupported Subtitles does the same). The message also goes
+     to the info log:
+     `Damaged video: 7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy.`
+     Position format `mm:ss`, or `h:mm:ss` from one hour. Missing time has one decimal, or two below
+     1 s (`about 0.04s`).
+- Tools: only ffprobe, found the same way as Convert Unsupported Subtitles (bundled ffprobe, then one
+  next to an absolute `ffmpegPath`, then PATH).
+- If ffprobe cannot run or exits non-zero, the job **fails** with `Detect damaged video: <reason>`.
+  The check is only reached for non-standard-rate files, and passing them unchecked would defeat it.
 - The gap analysis and verdict are pure functions, exported as `module.exports._test` like Convert
   Unsupported Subtitles.
 
@@ -89,7 +96,7 @@ their rate is non-standard.
 
 - After deciding a file is a near-miss and before running mkvmerge, list the video timestamps and run
   the same gap analysis. Any gap → log
-  `Near-miss rate 23955/1000 but the timing has 3 gaps (largest 0.08s at 01:12, about 0.1s missing). Forcing a constant rate would desync audio. Skipping.`
+  `Near-miss rate 23185/967, but found 1 timing gap (largest 0.08s at 00:02), about 0.04s of video missing. Forcing a constant rate would desync audio. Skipping.`
   and return without repairing. No gaps → repair exactly as today.
 - No decode here; any gap is enough to make the repair unsafe, deliberate or not.
 - The gap-analysis function is duplicated from the new plugin, because every plugin file must stand
@@ -125,7 +132,7 @@ stream, hiding the decode errors, and failing early wastes no work.
 - **Unit tests** (`node --test tests/*.test.js`, stubbed `../methods/lib` and `child_process` as in
   `tests/convert_unsupported_subs.test.js`):
   - `tests/detect_damaged_video.test.js`: gap analysis (steady 24 fps with 41/42 ms jitter → no gaps;
-    a single dropped frame → 1 gap; the E02 pattern → 7 gaps, largest 4.00 s at 00:50; unsorted
+    a single dropped frame → 1 gap; the E02 pattern → 7 gaps, largest 4.17 s at 04:00; unsorted
     input; packets without `pts_time`; fewer than 2 packets), position formatting, the verdict table,
     exact error text, tool-failure paths, standard-rate and no-video short-circuits, decode not run
     when there are no gaps.
@@ -133,14 +140,18 @@ stream, hiding the decode errors, and failing early wastes no work.
     steady near-miss → mkvmerge runs), and the shared gap cases run against both plugins' copies.
 - **Integration test** `tests/container/detect_damaged_video.itest.js`, run inside the `tdarr-node`
   container like the existing one, with real Tdarr `methods/lib`, ffmpeg, ffprobe and mkvtoolnix. It
-  builds its own fixtures under `/tmp/itest` with the bundled ffmpeg, so it needs no media:
-  - *clean*: 10 s of `testsrc2` at 24 fps, H.264, MKV → detector continues.
-  - *deliberate VFR*: same source with frames 120–215 removed by the `select` filter before encoding
-    (`-fps_mode passthrough`) → 4 s gap, clean decode → detector continues and logs VFR; Repair Frame
-    Rate run on it with `max_delta_fps` raised so it counts as a near-miss → skips with the gap
-    message and writes no output.
-  - *damaged*: the clean encode with a long GOP, stream-copied through the `noise` bitstream filter
-    dropping packets 120–215 → gap plus decode errors → detector throws the exact damaged message.
+  builds its own fixtures under `/tmp/itest` with `tdarr-ffmpeg`, so it needs no media. x264 runs
+  with `-threads 1` so the output (and the decode error count) is the same every run. The gappy
+  files go through MP4 first, which gives them an odd frame rate (`72/5`) like the real downloads:
+  - *clean*: 10 s of `testsrc2` at 24 fps, H.264 → `24/1` → detector skips (standard rate).
+  - *steady*: `testsrc2` at `72/5` → odd rate, no gaps → detector continues.
+  - *deliberate VFR*: frames 120–215 removed by the `select` filter before encoding
+    (`-fps_mode passthrough`) → one 4.04 s gap, clean decode → detector continues and logs VFR;
+    Repair Frame Rate run on it with `max_delta_fps: 10` (so `72/5` counts as a near-miss of
+    `24000/1001`) → skips with the gap message and writes no output.
+  - *damaged*: the clean encode (`-g 240`) stream-copied through the `noise` bitstream filter
+    dropping packets 120–215 → 2 gaps (largest 4.00 s at 00:05), 3 decode errors → detector fails
+    with the exact damaged message.
   - Optional argument: a real file under `/media`; if given, it must be reported as damaged (useful
     for the current Space King E02 until it is replaced).
 - README "Tests" section gains the stage/run/clean-up commands for the new integration test.
