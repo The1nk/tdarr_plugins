@@ -186,7 +186,7 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
     }
     var times = parseTimes(list.stdout);
     if (times.length < 2) {
-      throw new Error('ffprobe listed no usable video timestamps (' + times.length + ' found)');
+      throw new Error('ffprobe listed too few usable video timestamps (' + times.length + ' found)');
     }
     var g = findGaps(times);
     if (!g.gaps.length) {
@@ -194,8 +194,9 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
       return response;
     }
 
-    // Decode every frame (repeat+ keeps ffmpeg from folding repeated errors into "Last message repeated N times"). ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a
-    // variable-rate file's timestamps: every stderr line is a decoder error.
+    // Decode every frame. "repeat+" keeps ffmpeg from folding repeated errors into "Last message repeated
+    // N times". ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a variable-rate
+    // file's timestamps: every stderr line is a decoder error.
     var dec = run(ffprobe, ['-v', 'repeat+error', '-select_streams', stream, '-count_frames',
       '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', file._id]);
     if (dec.error || dec.status !== 0) {

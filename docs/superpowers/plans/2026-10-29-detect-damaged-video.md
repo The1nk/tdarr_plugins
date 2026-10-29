@@ -470,7 +470,7 @@ test('plugin: a killed decode fails the job', () => {
 
 test('plugin: listing with no usable timestamps fails the job instead of passing as steady', () => {
   const { res, calls } = run({ listing: { status: 0, stdout: 'N/A\nN/A\n', stderr: '' } });
-  assert.strictEqual(res.error, 'Detect damaged video: ffprobe listed no usable video timestamps (0 found)');
+  assert.strictEqual(res.error, 'Detect damaged video: ffprobe listed too few usable video timestamps (0 found)');
   assert.strictEqual(calls.length, 1);
 });
 
@@ -595,7 +595,7 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
     }
     var times = parseTimes(list.stdout);
     if (times.length < 2) {
-      throw new Error('ffprobe listed no usable video timestamps (' + times.length + ' found)');
+      throw new Error('ffprobe listed too few usable video timestamps (' + times.length + ' found)');
     }
     var g = findGaps(times);
     if (!g.gaps.length) {
@@ -603,8 +603,9 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
       return response;
     }
 
-    // Decode every frame (repeat+ keeps ffmpeg from folding repeated errors into "Last message repeated N times"). ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a
-    // variable-rate file's timestamps: every stderr line is a decoder error.
+    // Decode every frame. "repeat+" keeps ffmpeg from folding repeated errors into "Last message repeated
+    // N times". ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a variable-rate
+    // file's timestamps: every stderr line is a decoder error.
     var dec = run(ffprobe, ['-v', 'repeat+error', '-select_streams', stream, '-count_frames',
       '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', file._id]);
     if (dec.error || dec.status !== 0) {
@@ -752,6 +753,43 @@ test('repair: a failed timestamp listing leaves the original untouched', () => {
   assert.strictEqual(res.error, undefined);
 });
 
+test('repair: ffprobe that cannot be started leaves the original untouched', () => {
+  const { res } = run({ listing: { error: new Error('spawnSync ffprobe ENOENT'), status: null, signal: null } });
+  assert.strictEqual(res.infoLog, 'Error: ffprobe could not list the video timestamps (not started): spawnSync ffprobe ENOENT. Original left untouched.\r\n');
+});
+
+test('repair: too few usable timestamps means the timing cannot be checked, so no repair', () => {
+  const { res, calls } = run({ listing: { status: 0, stdout: 'N/A\nN/A\n', stderr: '' } });
+  assert.strictEqual(res.infoLog, 'Near-miss rate 23185/967, but ffprobe listed too few usable video timestamps (0 found), '
+    + 'so the timing cannot be checked. Skipping.\r\n');
+  assert.deepStrictEqual(calls.map((x) => x[0]), ['ffprobe']);
+});
+
+test('repair: without a numeric stream index, selects the video by its position among video streams', () => {
+  stubs = null;
+  const calls = [];
+  stubs = {
+    fs: { existsSync: () => false, unlinkSync: () => {} },
+    child_process: {
+      spawnSync: (cmd, args) => {
+        calls.push([cmd].concat(args));
+        if (args.includes('packet=pts_time')) return { status: 0, stdout: csv(grid(0, 50).concat(grid(51, 100))), stderr: '' };
+        throw new Error('unexpected call: ' + cmd + ' ' + args.join(' '));
+      },
+    },
+  };
+  try {
+    const file = { _id: '/m/a.mkv', file: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: [
+      { codec_type: 'video', r_frame_rate: '90000/1', disposition: { attached_pic: 1 } },
+      { codec_type: 'video', r_frame_rate: '23185/967' },
+    ] } };
+    repair.plugin(file, {}, { max_delta_fps: 0.05 }, { cacheFilePath: '/w/a.mkv', mkvpropeditPath: 'mkvpropedit' });
+  } finally {
+    stubs = null;
+  }
+  assert.deepStrictEqual(calls[0].slice(3, 5), ['-select_streams', 'v:1']);
+});
+
 // Each plugin file must stand alone, so the gap code exists twice. Both copies must agree.
 test('shared gap code: both plugins give the same results', () => {
   const r = repair._test;
@@ -778,7 +816,7 @@ test('shared gap code: both plugins give the same results', () => {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `node --test tests/repair_framerate.test.js`
-Expected: FAIL. The steady/gappy/listing tests fail because no `ffprobe` call happens before `mkvmerge`; the parity test fails with `Cannot read properties of undefined (reading 'parseTimes')` (no `_test` export yet). The far-off test passes already.
+Expected: FAIL. The steady/gappy/listing/not-started/no-timestamps/stream-position tests fail because no `ffprobe` call happens before `mkvmerge`; the parity test fails with `Cannot read properties of undefined (reading 'parseTimes')` (no `_test` export yet). The far-off test passes already.
 
 - [ ] **Step 3: Implement the guard**
 
@@ -811,15 +849,29 @@ In `Tdarr_Plugin_the1nk_repair_framerate.js`:
 
     // Frames missing from the stream also give a near-miss rate (24 fps missing 1 frame in 600 is 23.96).
     // Forcing a constant rate would close those holes by sliding the video out of sync with the audio.
-    var stream = typeof video.index === 'number' ? String(video.index) : 'v:0';
+    var stream;
+    if (typeof video.index === 'number') {
+      stream = String(video.index);
+    } else {
+      // ffprobe's v:N counts cover art too.
+      var before = streams.slice(0, streams.indexOf(video));
+      stream = 'v:' + before.filter(function (s) { return s.codec_type === 'video'; }).length;
+    }
     var list = spawnSync(ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
       '-of', 'csv=p=0', '--', file._id], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
     if (list.error || list.status !== 0) {
       throw new Error('ffprobe could not list the video timestamps ('
-        + (list.signal ? 'signal ' + list.signal : 'exit ' + list.status) + '): '
-        + (list.error ? list.error.message : list.stderr));
+        + (list.error && list.status === null && !list.signal ? 'not started'
+          : list.signal ? 'signal ' + list.signal : 'exit ' + list.status) + '): '
+        + String(list.error ? list.error.message : list.stderr).slice(-2000));
     }
-    var timing = findGaps(parseTimes(list.stdout));
+    var times = parseTimes(list.stdout);
+    if (times.length < 2) {
+      response.infoLog += 'Near-miss rate ' + rate + ', but ffprobe listed too few usable video timestamps ('
+        + times.length + ' found), so the timing cannot be checked. Skipping.\r\n';
+      return response;
+    }
+    var timing = findGaps(times);
     if (timing.gaps.length) {
       response.infoLog += 'Near-miss rate ' + rate + ', but found ' + describeGaps(timing)
         + '. Forcing a constant rate would desync audio. Skipping.\r\n';

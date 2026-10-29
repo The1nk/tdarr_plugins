@@ -243,7 +243,7 @@ test('plugin: a killed decode fails the job', () => {
 
 test('plugin: listing with no usable timestamps fails the job instead of passing as steady', () => {
   const { res, calls } = run({ listing: { status: 0, stdout: 'N/A\nN/A\n', stderr: '' } });
-  assert.strictEqual(res.error, 'Detect damaged video: ffprobe listed no usable video timestamps (0 found)');
+  assert.strictEqual(res.error, 'Detect damaged video: ffprobe listed too few usable video timestamps (0 found)');
   assert.strictEqual(calls.length, 1);
 });
 
