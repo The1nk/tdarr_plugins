@@ -9,9 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Pull from Tdarr** (copy all `.js` files from the Tdarr plugins dir into `plugins/`): `./pull.ps1`
 - **Push to Tdarr** (copy all `.js` files from `plugins/` into the Tdarr plugins dir): `./push.ps1`
 
-Plugins live in `plugins/` and flow exports in `flows/` (`flow*.local.json` copies with real API keys are gitignored).
+Plugins live in `plugins/`, flow exports in `flows/` (`flow*.local.json` copies with real API keys are gitignored), and `tools/check-video.js` loads `plugins/Tdarr_Plugin_the1nk_detect_damaged_video.js` directly, so changes to that plugin's `_test` helpers affect the tool.
 
-There is no build step or linter config. Unit tests run with `node --test tests/*.test.js` (Node 25 doesn't accept `node --test tests/`); the container integration test is described in the README "Tests" section.
+There is no build step or linter config. Unit tests run with `node --test tests/*.test.js` (Node 25 doesn't accept `node --test tests/`); the container integration tests (`tests/container/`) are described in the README "Tests" section.
 
 ## Plugin Architecture
 

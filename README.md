@@ -5,19 +5,21 @@ Custom [Tdarr](https://home.tdarr.io/) plugins for automated media processing: t
 ## Repository layout
 
 ```
-plugins/        Tdarr plugin files (Tdarr_Plugin_<author>_<description>.js)
-flows/          Tdarr flow exports: flow*.json, plus gitignored flow*.local.json
-tools/          Command-line tools (check-video.js)
-tests/          Unit tests (*.test.js)
-  container/    Integration tests that run inside the tdarr-node container
-docs/superpowers/   Design specs and implementation plans (historical)
-push.ps1        Copies plugins/*.js to the Tdarr plugins folder
-pull.ps1        Copies the Tdarr plugins folder's *.js into plugins/
-path.env        Path to the Tdarr plugins folder (gitignored)
-CLAUDE.md       Guidance for Claude Code
+README.md          This file
+CLAUDE.md          Guidance for Claude Code
+.gitignore         Ignores path.env, *.local.json and the two plugins not kept here
+plugins/           Tdarr plugin files (Tdarr_Plugin_<author>_<description>.js)
+flows/             Tdarr flow exports: flow*.json, plus gitignored flow*.local.json
+tools/             Command-line tools (check-video.js)
+tests/             Unit tests (*.test.js)
+  container/       Integration tests that run inside the tdarr-node container
+docs/superpowers/  Design specs and implementation plans (historical)
+push.ps1           Copies plugins/*.js to the Tdarr plugins folder
+pull.ps1           Copies the Tdarr plugins folder's *.js into plugins/
+path.env           Path to the Tdarr plugins folder (gitignored)
 ```
 
-- `plugins/`: one standalone `.js` file per plugin; see [Plugins](#plugins). Older community plugins that are used (see [Local copies of community plugins](#local-copies-of-community-plugins)) live here too.
+- `plugins/`: one standalone `.js` file per plugin; see [Plugins](#plugins). The local copies of the community plugins the flows use (see [Local copies of community plugins](#local-copies-of-community-plugins)) live here too.
 - `flows/`: the five flow exports, described under [Plugin Flow](#plugin-flow). The committed `flow*.json` files have placeholder API keys. The gitignored `flow*.local.json` copies hold the real Radarr/Sonarr API keys and are the ones to import into Tdarr.
 - `tools/`: see [Tools](#tools).
 - `tests/` and `tests/container/`: the unit tests and the in-container integration tests; see [Tests](#tests).
@@ -29,7 +31,7 @@ CLAUDE.md       Guidance for Claude Code
 
 - [Plugin Flow](#plugin-flow): the flow layout and its [ordering rules](#ordering-rules)
 - [Plugins](#plugins): what each plugin does and its inputs
-- [Local copies of community plugins](#local-copies-of-community-plugins)
+  - [Local copies of community plugins](#local-copies-of-community-plugins)
 - [Tools](#tools): `check-video.js`
 - [Deployment](#deployment)
 - [Tests](#tests)
@@ -62,14 +64,14 @@ flowchart TD
     t2 --> t3[Migz Remux Container<br/>mkv, force_conform]
     t3 --> t4[Remove Data Streams]
     t4 --> t5[Migz Remove Image Formats]
-    t5 --> t7[Downmix to Stereo + DRC]
-    t7 --> t8[Lmg1 Reorder Streams]
-    t8 --> t8b[Run mkvpropedit<br/>refresh_only]
-    t8b --> t9[H265 CPU Transcode<br/>cutoff 3000k, max 4500k]
-    t9 --> t9b[Repair Near-Miss Frame Rate]
-    t9b --> t9c[Run mkvpropedit<br/>refresh_only]
-    t9c --> t10[Add Suffix to Filename]
-    t10 --> replace[Replace Original File]
+    t5 --> t6[Downmix to Stereo + DRC]
+    t6 --> t7[Lmg1 Reorder Streams]
+    t7 --> t8[Run mkvpropedit<br/>refresh_only]
+    t8 --> t9[H265 CPU Transcode<br/>cutoff 3000k, max 4500k]
+    t9 --> t10[Repair Near-Miss Frame Rate]
+    t10 --> t11[Run mkvpropedit<br/>refresh_only]
+    t11 --> t12[Add Suffix to Filename]
+    t12 --> replace[Replace Original File]
     replace --> p1[Run Bash Script<br/>/media/match-subtitles.sh]
     p1 --> p2[Notify Radarr / Sonarr]
 ```
@@ -90,7 +92,7 @@ Both outputs of every transcode node ("processed" / "not processed") lead to the
 
 ## Plugins
 
-The plugin files are in `plugins/`. Two older plugins (MichPas Clean Subs and Break Hardlink) remain in Tdarr's plugins folder but aren't kept in this repo.
+The plugin files are in `plugins/`. Two older plugins (MichPas Clean Subs and Break Hardlink) remain in Tdarr's plugins folder but aren't kept in this repo. A pull copies them back into `plugins/`, where they are gitignored (see [Deployment](#deployment)).
 
 ### Pre-processing / Filter
 
@@ -103,7 +105,7 @@ Skips the plugin stack if the filename ends with the specified suffix. Useful fo
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
-| `suffix` | string | `(Tdarr)` | Suffix to look for in the filename |
+| `suffix` | string | `" (Tdarr)"` | Suffix to look for in the filename |
 
 ---
 
@@ -229,13 +231,13 @@ With `refresh_only`, the plugin ignores the `TDARR_MKVPROPEDIT` tag, skips the F
 ---
 
 #### `Tdarr_Plugin_the1nk_add_suffix_to_filename`
-**Add Suffix to Filename** — v1.00
+**Add Suffix to Filename** — v1.01
 
 Appends a configurable suffix to the output filename (e.g. `My Movie (Tdarr).mkv`) by renaming the current working file. Skips files that already have the suffix. A trailing empty `()` is stripped before the suffix is added. In a flow, put this **before** Replace Original File (see [Ordering rules](#ordering-rules)).
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
-| `suffix` | string | `(Tdarr)` | Text to append to the filename |
+| `suffix` | string | `" (Tdarr)"` | Text to append to the filename |
 
 ---
 
@@ -282,7 +284,7 @@ Executes an arbitrary bash script after processing. The directory of the current
 
 ### Local copies of community plugins
 
-These are community plugins kept in `Local` so the flows reference a fixed version. They are unmodified except where noted:
+These are community plugins kept as local copies (in `plugins/` here, and in Tdarr's `Local` plugins folder) so the flows reference a fixed version. They are unmodified except where noted:
 
 | Plugin | Used for |
 |--------|----------|
@@ -345,7 +347,7 @@ If the output is cut short (for example piped into `Select-Object -First N` or `
 
 ## Deployment
 
-`path.env` (gitignored) holds the path to the Tdarr plugins folder. `./push.ps1` copies every `.js` file in `plugins/` to that folder, and `./pull.ps1` copies every `.js` file from that folder into `plugins/`. Both work from any current directory. Pulling also brings back the two plugins that aren't kept in the repo; they are gitignored. See also [`CLAUDE.md`](CLAUDE.md).
+`path.env` (gitignored) holds the path to the Tdarr plugins folder. `./push.ps1` copies every `.js` file in `plugins/` to that folder, and `./pull.ps1` copies every `.js` file from that folder into `plugins/`. Both work from any current directory, and stop with an error if `path.env` is missing, empty, or points at a folder that doesn't exist. Pulling also brings back the two plugins that aren't kept in the repo; they are gitignored. See also [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
