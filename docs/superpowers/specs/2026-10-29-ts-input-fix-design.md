@@ -50,8 +50,12 @@ the `TDARR_DRC_PROCESSED` tag, so running them through the flow again would comp
 - Unit tests `tests/migz_remux.test.js`: a `.ts` labelled audio with an H.264 stream is remuxed (exact
   preset `-fflags +genpts, -map 0 -c copy -max_muxing_queue_size 9999 -map -0:d `, container `.mkv`); an
   audio file whose only video stream is cover art, and an audio-only file, are still "not a video"; an
-  MKV video is "already in mkv"; a normal `.mp4` video is remuxed without genpts.
-- Unit tests `tests/add_suffix.test.js` (stubbed `fs.renameSync`): a `.ts` whose ExifTool extension is
-  `m2t` keeps `.ts`; `.mkv` keeps `.mkv`; a trailing ` ()` is cleaned; an already-suffixed name isn't
-  renamed.
+  MKV video is "already in mkv"; a normal `.mp4` video is remuxed without genpts; an `.mkv` labelled audio
+  whose video stream reads `0/0` is remuxed (genpts, the "Tdarr labels this file audio" log line); a
+  real-format TS record (audio first, `0/0` H.264 video later) is remuxed; missing `ffProbeData` is "not a
+  video".
+- Unit tests `tests/add_suffix.test.js` (stubbed `fs.renameSync`, literal POSIX paths): a `.ts` whose
+  ExifTool extension is `m2t` keeps `.ts`; `.mkv` keeps `.mkv`; a trailing ` ()` is cleaned; an
+  already-suffixed name isn't renamed; a dotted name (`Mr. Robot - S01E01.mkv`) and an upper-case extension
+  (`UPPER.MKV`) are kept intact; a record without `meta` is still renamed.
 - After deployment, the seven conversions are verified as above.
