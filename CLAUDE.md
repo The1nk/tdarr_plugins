@@ -6,14 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `path.env` holds the path to the local Tdarr plugins directory (network share). This file is gitignored.
 
-- **Pull from Tdarr** (copy all `.js` files from the Tdarr plugins dir into this repo): `./pull.ps1`
-- **Push to Tdarr** (copy all `.js` files from this repo into the Tdarr plugins dir): `./push.ps1`
+- **Pull from Tdarr** (copy all `.js` files from the Tdarr plugins dir into `plugins/`): `./pull.ps1`
+- **Push to Tdarr** (copy all `.js` files from `plugins/` into the Tdarr plugins dir): `./push.ps1`
+
+Plugins live in `plugins/` and flow exports in `flows/` (`flow*.local.json` copies with real API keys are gitignored).
 
 There is no build step or linter config. Unit tests run with `node --test tests/*.test.js` (Node 25 doesn't accept `node --test tests/`); the container integration test is described in the README "Tests" section.
 
 ## Plugin Architecture
 
-Each plugin is a standalone `.js` file named `Tdarr_Plugin_<author>_<description>.js`. Every plugin exports two things:
+Each plugin is a standalone `.js` file in `plugins/`, named `Tdarr_Plugin_<author>_<description>.js`. Every plugin exports two things:
 
 ```js
 module.exports.details = details;  // metadata function

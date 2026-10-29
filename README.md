@@ -1,6 +1,38 @@
 # Tdarr Plugins
 
-Custom [Tdarr](https://home.tdarr.io/) plugins for automated media processing.
+Custom [Tdarr](https://home.tdarr.io/) plugins for automated media processing: the plugin files, the flow exports that wire them together, a command-line tool for checking videos, and the tests for all of it.
+
+## Repository layout
+
+```
+plugins/        Tdarr plugin files (Tdarr_Plugin_<author>_<description>.js)
+flows/          Tdarr flow exports: flow*.json, plus gitignored flow*.local.json
+tools/          Command-line tools (check-video.js)
+tests/          Unit tests (*.test.js)
+  container/    Integration tests that run inside the tdarr-node container
+docs/superpowers/   Design specs and implementation plans (historical)
+push.ps1        Copies plugins/*.js to the Tdarr plugins folder
+pull.ps1        Copies the Tdarr plugins folder's *.js into plugins/
+path.env        Path to the Tdarr plugins folder (gitignored)
+CLAUDE.md       Guidance for Claude Code
+```
+
+- `plugins/`: one standalone `.js` file per plugin; see [Plugins](#plugins). Older community plugins that are used (see [Local copies of community plugins](#local-copies-of-community-plugins)) live here too.
+- `flows/`: the five flow exports, described under [Plugin Flow](#plugin-flow). The committed `flow*.json` files have placeholder API keys. The gitignored `flow*.local.json` copies hold the real Radarr/Sonarr API keys and are the ones to import into Tdarr.
+- `tools/`: see [Tools](#tools).
+- `tests/` and `tests/container/`: the unit tests and the in-container integration tests; see [Tests](#tests).
+- `docs/superpowers/`: the design specs and implementation plans the work was done from. They are historical records, so the file paths in them describe the layout at the time they were written.
+- `push.ps1` / `pull.ps1` and `path.env`: see [Deployment](#deployment).
+- `CLAUDE.md`: project guidance for Claude Code, which also holds the deployment instructions.
+
+## Contents
+
+- [Plugin Flow](#plugin-flow): the flow layout and its [ordering rules](#ordering-rules)
+- [Plugins](#plugins): what each plugin does and its inputs
+- [Local copies of community plugins](#local-copies-of-community-plugins)
+- [Tools](#tools): `check-video.js`
+- [Deployment](#deployment)
+- [Tests](#tests)
 
 ## Plugin Flow
 
@@ -8,13 +40,13 @@ The plugins run as Tdarr **Flows**, with each classic plugin wrapped in a "Run C
 
 | File | Library | Notify step |
 |------|---------|-------------|
-| `flowMovies.json` | Movies | Radarr |
-| `flowAnimovies.json` | Animovies | Radarr |
-| `flowShows.json` | Shows | Sonarr |
-| `flowAnishows.json` | Anishows | Sonarr |
-| `flowOtherVideos.json` | Other Videos | _(none)_ |
+| `flows/flowMovies.json` | Movies | Radarr |
+| `flows/flowAnimovies.json` | Animovies | Radarr |
+| `flows/flowShows.json` | Shows | Sonarr |
+| `flows/flowAnishows.json` | Anishows | Sonarr |
+| `flows/flowOtherVideos.json` | Other Videos | _(none)_ |
 
-The committed flows have their Radarr/Sonarr API keys replaced with `YOUR_RADARR_API_KEY` / `YOUR_SONARR_API_KEY`. Keep a copy with the real keys as `flow*.local.json` (gitignored) and import that one into Tdarr. When you change a flow, update both files.
+The committed flows have their Radarr/Sonarr API keys replaced with `YOUR_RADARR_API_KEY` / `YOUR_SONARR_API_KEY`. Keep a copy with the real keys as `flows/flow*.local.json` (gitignored) and import that one into Tdarr. When you change a flow, update both files.
 
 All five share the same layout:
 
@@ -51,12 +83,14 @@ Both outputs of every transcode node ("processed" / "not processed") lead to the
 - **Convert Unsupported Subtitles comes next, before any FFmpeg step.** Every later step copies all streams (`-map 0 -c copy`), and FFmpeg can't copy a track it can't read, so a single WebVTT track stored as `S_TEXT/WEBVTT` fails the whole flow with `Subtitle codec 0 is not supported`.
 - **Repair Frame Rate goes _after_ H265 CPU Transcode.** It's the last step that touches video, so the repair can't be undone by a later FFmpeg pass.
 - **mkvpropedit runs twice, both times as `refresh_only`.** FFmpeg copies existing statistics unchanged onto the streams it re-encodes, so a re-encoded video can claim its old H.264 bitrate. The first run comes after DRC and Reorder, just before H265 CPU Transcode, so its `max_bitrate` check reads up-to-date `BPS` values. The second run comes after the last step that changes the file (x265 / Repair Frame Rate), so the final file's statistics match its streams.
-- **Nothing edits the library file in place.** Radarr and Sonarr hardlink imports to the torrent client's copies, so an in-place edit would also change the seeding torrent. Every step before Replace Original File writes to the Tdarr cache; mkvpropedit `refresh_only` refuses to touch the original; and Add Suffix only renames. That's why the flows don't need Break Hardlink, which used to cost a full copy of every file.
+- **Nothing edits the library file in place.** Radarr and Sonarr hardlink imports to the torrent client's copies, so an in-place edit would also change the seeding torrent. Every step before Replace Original File writes to the Tdarr cache; mkvpropedit `refresh_only` refuses to touch the original; and Add Suffix only renames. That's why the flows don't need to break hardlinks first, which used to cost a full copy of every file.
 - **One gap from that rule:** if DRC skips an MKV (no audio, or already `TDARR_DRC_PROCESSED`) and no earlier step changed it, the first refresh skips it too. The `max_bitrate` check then only sees statistics the file already had, if any. New imports always have audio and no DRC tag, so they always get fresh statistics.
 - **Add Suffix goes _before_ Replace Original File.** It renames the working file, and Replace Original File then puts it in the library folder under the new name, deleting the old one.
 - **Bash Script and Notify go _after_ Replace Original File.** They need the final file in its real library folder. Before the replace step, the script would run in the cache directory, the Sonarr plugin wouldn't find the `{imdb-…}` show folder, and Radarr would rescan before the new file existed.
 
 ## Plugins
+
+The plugin files are in `plugins/`. Two older plugins (MichPas Clean Subs and Break Hardlink) remain in Tdarr's plugins folder but aren't kept in this repo.
 
 ### Pre-processing / Filter
 
@@ -190,19 +224,6 @@ With `refresh_only`, the plugin ignores the `TDARR_MKVPROPEDIT` tag, skips the F
 
 ---
 
-#### `Tdarr_Plugin_the1nk_break_hardlink`
-**Break Hardlink** — v1.01 _(not used by the flows)_
-
-Breaks filesystem hardlinks by copying the file to a temp path and atomically renaming it back. Run this before any plugin that modifies files in-place to ensure other hardlinked copies are not affected. The current flows don't need it (see [Ordering rules](#ordering-rules)).
-
-If the copy or rename fails, the plugin deletes the temp file and **fails the job**. Continuing would leave the file hardlinked, so a later in-place edit would also modify the other link.
-
-> **Note:** Relies on Linux `rename(2)` atomic-overwrite semantics. Will not work correctly on Windows.
-
-No inputs.
-
----
-
 ### Post-processing
 
 ---
@@ -268,7 +289,6 @@ These are community plugins kept in `Local` so the flows reference a fixed versi
 | `Tdarr_Plugin_00td_action_remove_stream_by_specified_property` | Drops `bmp` streams (`propertyToCheck=codec_name`, `valuesToRemove=bmp`) |
 | `Tdarr_Plugin_MC93_Migz1Remux` | Remuxes to MKV with `force_conform` (drops data / `mov_text` / `eia_608` / `timed_id3`). **Modified (v1.2.1):** also remuxes files Tdarr labels audio when ffprobe finds a real video stream, even if the container already matches (Tdarr labels a file audio when its video frame rate reads `0/0`, seen on some MPEG-TS captures); the remux re-derives the rate |
 | `Tdarr_Plugin_vdka_Remove_DataStreams` | Drops any remaining data streams |
-| `Tdarr_Plugin_MP01_MichPasCleanSubsAndAudioCodecs` | _Not used by any flow_ |
 
 `Tdarr_Plugin_MC93_MigzImageRemoval` and `Tdarr_Plugin_lmg1_Reorder_Streams` are used straight from the `Community` repo.
 
@@ -325,7 +345,7 @@ If the output is cut short (for example piped into `Select-Object -First N` or `
 
 ## Deployment
 
-See [`CLAUDE.md`](CLAUDE.md) for deployment instructions (push/pull scripts).
+`path.env` (gitignored) holds the path to the Tdarr plugins folder. `./push.ps1` copies every `.js` file in `plugins/` to that folder, and `./pull.ps1` copies every `.js` file from that folder into `plugins/`. Both work from any current directory. Pulling also brings back the two plugins that aren't kept in the repo; they are gitignored. See also [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
@@ -343,8 +363,8 @@ Integration test for `Tdarr_Plugin_the1nk_convert_unsupported_subs`, run inside 
 
 ```bash
 MSYS_NO_PATHCONV=1 docker exec tdarr-node sh -c 'rm -rf /tmp/itest && mkdir -p /tmp/itest/plugins/Local && ln -s /app/Tdarr_Node/assets/app/plugins/methods /tmp/itest/plugins/methods'
-MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_convert_unsupported_subs.js tdarr-node:/tmp/itest/plugins/Local/
-MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_downmix_to_stereo_and_apply_DRC.js tdarr-node:/tmp/itest/plugins/Local/
+MSYS_NO_PATHCONV=1 docker cp plugins/Tdarr_Plugin_the1nk_convert_unsupported_subs.js tdarr-node:/tmp/itest/plugins/Local/
+MSYS_NO_PATHCONV=1 docker cp plugins/Tdarr_Plugin_the1nk_downmix_to_stereo_and_apply_DRC.js tdarr-node:/tmp/itest/plugins/Local/
 MSYS_NO_PATHCONV=1 docker cp tests/container/convert_unsupported_subs.itest.js tdarr-node:/tmp/itest/plugins/
 MSYS_NO_PATHCONV=1 docker exec tdarr-node node /tmp/itest/plugins/convert_unsupported_subs.itest.js "<source mkv under /media>"
 MSYS_NO_PATHCONV=1 docker exec tdarr-node rm -rf /tmp/itest
@@ -354,8 +374,8 @@ Integration test for `Tdarr_Plugin_the1nk_detect_damaged_video` and Repair Frame
 
 ```bash
 MSYS_NO_PATHCONV=1 docker exec tdarr-node sh -c 'rm -rf /tmp/itest && mkdir -p /tmp/itest/plugins/Local && ln -s /app/Tdarr_Node/assets/app/plugins/methods /tmp/itest/plugins/methods'
-MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_detect_damaged_video.js tdarr-node:/tmp/itest/plugins/Local/
-MSYS_NO_PATHCONV=1 docker cp Tdarr_Plugin_the1nk_repair_framerate.js tdarr-node:/tmp/itest/plugins/Local/
+MSYS_NO_PATHCONV=1 docker cp plugins/Tdarr_Plugin_the1nk_detect_damaged_video.js tdarr-node:/tmp/itest/plugins/Local/
+MSYS_NO_PATHCONV=1 docker cp plugins/Tdarr_Plugin_the1nk_repair_framerate.js tdarr-node:/tmp/itest/plugins/Local/
 MSYS_NO_PATHCONV=1 docker cp tests/container/detect_damaged_video.itest.js tdarr-node:/tmp/itest/plugins/
 MSYS_NO_PATHCONV=1 docker exec tdarr-node node /tmp/itest/plugins/detect_damaged_video.itest.js ["<damaged file under /media>"]
 MSYS_NO_PATHCONV=1 docker exec tdarr-node rm -rf /tmp/itest
