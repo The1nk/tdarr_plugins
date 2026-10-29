@@ -8,8 +8,8 @@ const details = () => {
     Name: "Repair near-miss frame rate",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Losslessly repairs malformed MKV frame-rate metadata (e.g. 23185/967 instead of 24000/1001) that makes files stutter on devices like the Fire TV 4K Max. Remuxes with mkvmerge, setting the default duration to the nearest standard rate and fixing bitstream timing. The result is verified (rate, codec, pixel format, duration, video packet count) before it is used; on any failure the file is left untouched. Flow-only: runs mkvmerge itself and hands the repaired file to the next flow plugin.`,
-    Version: "1.01",
+    Description: `Losslessly repairs malformed MKV frame-rate metadata (e.g. 23185/967 instead of 24000/1001) that makes files stutter on devices like the Fire TV 4K Max. Remuxes with mkvmerge, setting the default duration to the nearest standard rate and fixing bitstream timing. Files whose frame timing has gaps (frames missing) are never repaired: forcing a constant rate would close the gaps by sliding the video out of sync with the audio. The result is verified (rate, codec, pixel format, duration, video packet count) before it is used; on any failure the file is left untouched. Flow-only: runs mkvmerge itself and hands the repaired file to the next flow plugin.`,
+    Version: "1.02",
     Tags: "pre-processing,mkvmerge,video only",
     Inputs: [{
       name: 'max_delta_fps',
@@ -35,6 +35,73 @@ const toFps = (rate) => {
   if (p.length !== 2 || Number(p[1]) === 0) return 0;
   return Number(p[0]) / Number(p[1]);
 };
+
+// --- Gaps in the frame timing. Keep identical to the copy in Tdarr_Plugin_the1nk_detect_damaged_video.js. ---
+
+// ffprobe "packet=pts_time" CSV -> timestamps in seconds, ascending (B-frames arrive out of display
+// order). Packets without a timestamp (N/A) are dropped.
+var parseTimes = function (csv) {
+  return String(csv || '').split(/\r?\n/)
+    .map(function (line) { return line.split(',')[0].trim(); })
+    .filter(function (v) { return v !== ''; })
+    .map(Number)
+    .filter(Number.isFinite)
+    .sort(function (a, b) { return a - b; });
+};
+
+// normal: the most common interval between frames, to the millisecond (ties go to the shorter interval:
+// the keys are integers, so they are visited in ascending order and only a strictly higher count replaces the pick).
+// A gap is an interval of at least 1.5x normal: millisecond timebases make 24 fps alternate 41/42 ms,
+// so one lost frame shows as 83 ms, only 1.98x the 42 ms mode.
+// Each gap: at (seconds from the first frame, like a player clock) and length (seconds).
+// missing: seconds of video lost (each gap minus one normal interval).
+var findGaps = function (times) {
+  var counts = {};
+  var deltas = [];
+  for (var i = 1; i < times.length; i++) {
+    var ms = Math.round((times[i] - times[i - 1]) * 1000);
+    deltas.push(ms);
+    if (ms > 0) counts[ms] = (counts[ms] || 0) + 1;
+  }
+  var normal = 0;
+  var best = 0;
+  Object.keys(counts).forEach(function (k) {
+    var ms = Number(k);
+    if (counts[k] > best) { best = counts[k]; normal = ms; }
+  });
+  var gaps = [];
+  var missingMs = 0;
+  if (normal > 0) {
+    deltas.forEach(function (ms, j) {
+      if (ms >= normal * 1.5) {
+        gaps.push({ at: times[j] - times[0], length: ms / 1000 });
+        missingMs += ms - normal;
+      }
+    });
+  }
+  return { normal: normal / 1000, gaps: gaps, missing: missingMs / 1000 };
+};
+
+// 75 -> "01:15", 3725 -> "1:02:05"
+var clock = function (seconds) {
+  var t = Math.floor(seconds);
+  var h = Math.floor(t / 3600);
+  var m = Math.floor((t % 3600) / 60);
+  var s = t % 60;
+  var two = function (n) { return (n < 10 ? '0' : '') + n; };
+  return (h ? h + ':' : '') + two(m) + ':' + two(s);
+};
+
+var plural = function (n, one, many) { return n + ' ' + (n === 1 ? one : many); };
+
+// "7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing"
+var describeGaps = function (g) {
+  var largest = g.gaps.reduce(function (a, b) { return b.length > a.length ? b : a; });
+  return plural(g.gaps.length, 'timing gap', 'timing gaps') + ' (largest ' + largest.length.toFixed(2) + 's at '
+    + clock(largest.at) + '), about ' + g.missing.toFixed(g.missing < 0.995 ? 2 : 1) + 's of video missing';
+};
+
+// --- end of the shared gap code ---
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const plugin = (file, librarySettings, inputs, otherArguments) => {
@@ -105,6 +172,39 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       return response;
     }
 
+    var ffprobe = FFPROBE_CANDIDATES.find(function (c) { return !path.isAbsolute(c) || fs.existsSync(c); });
+
+    // Frames missing from the stream also give a near-miss rate (24 fps missing 1 frame in 600 is 23.96).
+    // Forcing a constant rate would close those holes by sliding the video out of sync with the audio.
+    var stream;
+    if (typeof video.index === 'number') {
+      stream = String(video.index);
+    } else {
+      // ffprobe's v:N counts cover art too.
+      var before = streams.slice(0, streams.indexOf(video));
+      stream = 'v:' + before.filter(function (s) { return s.codec_type === 'video'; }).length;
+    }
+    var list = spawnSync(ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
+      '-of', 'csv=p=0', '--', file._id], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    if (list.error || list.status !== 0) {
+      throw new Error('ffprobe could not list the video timestamps ('
+        + (list.error && list.status === null && !list.signal ? 'not started'
+          : list.signal ? 'signal ' + list.signal : 'exit ' + list.status) + '): '
+        + String(list.error ? list.error.message : list.stderr).slice(-2000));
+    }
+    var times = parseTimes(list.stdout);
+    if (times.length < 2) {
+      response.infoLog += 'Near-miss rate ' + rate + ', but ffprobe listed too few usable video timestamps ('
+        + times.length + ' found), so the timing cannot be checked. Skipping.\r\n';
+      return response;
+    }
+    var timing = findGaps(times);
+    if (timing.gaps.length) {
+      response.infoLog += 'Near-miss rate ' + rate + ', but found ' + describeGaps(timing)
+        + '. Forcing a constant rate would desync audio. Skipping.\r\n';
+      return response;
+    }
+
     if (!otherArguments || !otherArguments.cacheFilePath) {
       response.infoLog += 'No cacheFilePath provided (not running in a flow?), skipping.\r\n';
       return response;
@@ -114,8 +214,6 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     var propedit = (otherArguments.mkvpropeditPath || 'mkvpropedit');
     var mkvmerge = path.join(path.dirname(propedit), path.basename(propedit).replace('mkvpropedit', 'mkvmerge'));
     if (path.dirname(propedit) === '.') mkvmerge = path.basename(mkvmerge);
-
-    var ffprobe = FFPROBE_CANDIDATES.find(function (c) { return !path.isAbsolute(c) || fs.existsSync(c); });
 
     // Find the mkvmerge track ID of the video track (also confirms mkvmerge runs).
     var ident = spawnSync(mkvmerge, ['-J', file._id], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
@@ -198,3 +296,10 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
 
 module.exports.details = details;
 module.exports.plugin = plugin;
+// Pure helpers, exported for tests/repair_framerate.test.js. Tdarr only uses details and plugin.
+module.exports._test = {
+  parseTimes: parseTimes,
+  findGaps: findGaps,
+  clock: clock,
+  describeGaps: describeGaps,
+};
