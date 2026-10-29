@@ -155,7 +155,7 @@ const keyOf = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
 const walk = (dir, files, problems, visited) => {
   let real = dir;
   try {
-    real = fs.realpathSync(dir);
+    real = fs.realpathSync.native(dir);
   } catch (e) {
     // fall back to the path itself; readdir below reports the real problem
   }
@@ -211,7 +211,7 @@ const collectFiles = (paths) => {
     files: files.filter((f) => {
       let real = path.resolve(f);
       try {
-        real = fs.realpathSync(f);
+        real = fs.realpathSync.native(f);
       } catch (e) {
         // keep the resolved path
       }
@@ -329,7 +329,6 @@ const main = async (argv, deps) => {
   let next = 0;
   let done = 0;
   let interrupted = false;
-  let stopping = false; // a call ended with Ctrl+C's exit status
   const interrupt = () => {
     if (interrupted) return;
     interrupted = true;
@@ -340,7 +339,7 @@ const main = async (argv, deps) => {
   };
   const off = d.onInterrupt(interrupt);
   const worker = async () => {
-    while (!interrupted && !stopping && next < files.length) {
+    while (!interrupted && next < files.length) {
       const file = files[next++];
       let hit = false;
       const run = async (cmd, args, ropts) => {
@@ -354,18 +353,20 @@ const main = async (argv, deps) => {
       } catch (e) {
         r = { file, verdict: 'error', detail: oneLine(e.message) };
       }
-      if (hit) stopping = true;
-      if (interrupted || hit) return;
+      if (hit) interrupt(); // Ctrl+C reached an ffprobe before node's own handler ran
+      if (interrupted) return;
       results.push(r);
       done++;
       d.out('[' + done + '/' + files.length + '] ' + LABEL[r.verdict].padEnd(7) + ' ' + r.file + '\t' + r.detail);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(o.jobs, files.length) }, worker));
-  if (stopping) interrupt();
-  if (typeof off === 'function') off();
-  if (interrupted) return 130;
-  return summarise(results, files.length, d.out);
+  try {
+    await Promise.all(Array.from({ length: Math.min(o.jobs, files.length) }, worker));
+    if (interrupted) return 130;
+    return summarise(results, files.length, d.out);
+  } finally {
+    if (typeof off === 'function') off();
+  }
 };
 
 if (require.main === module) {

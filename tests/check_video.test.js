@@ -542,6 +542,35 @@ test('main: Ctrl+C prints Interrupted., the summary so far, and exits 130', asyn
   ]);
 });
 
+test('main: a Ctrl+C status on one call interrupts at once, while a sibling call is still pending (-j 2)', async (t) => {
+  const root = threeFiles(t);
+  const inner = fake();
+  let release = null;
+  const pending = new Promise((resolve) => { release = resolve; });
+  let probes = 0;
+  const exits = [];
+  let killed = 0;
+  const run = async (cmd, args) => {
+    if (args.includes(PROBE_ARG)) {
+      probes++;
+      if (probes === 1) {
+        await pending; // the sibling worker's call stays pending until the interrupt has happened
+        return inner(cmd, args);
+      }
+      if (probes === 2) return { status: 3221225786, signal: null, stdout: '', stderr: '' };
+    }
+    return inner(cmd, args);
+  };
+  const c = capture(run, { onInterrupt: () => () => {}, exit: (code) => { exits.push(code); release(); }, killChildren: () => { killed++; } });
+  assert.strictEqual(await main(['-j', '2', root], c.deps), 130);
+  assert.deepStrictEqual(exits, [130]);
+  assert.strictEqual(killed, 1);
+  assert.strictEqual(c.out.filter((l) => l === 'Interrupted.').length, 1);
+  assert.strictEqual(c.out.filter((l) => l.startsWith('Checked')).length, 1);
+  assert.ok(!c.out.some((l) => /^\[\d\/3\]/.test(l)), c.out.join(String.fromCharCode(10)));
+  assert.strictEqual(probes, 2);
+});
+
 test('runTool: captures status and output; a missing tool sets error', async () => {
   const r = await runTool(process.execPath, ['-e', 'process.stdout.write("hi");process.stderr.write("e");process.exit(3)']);
   assert.strictEqual(r.status, 3);

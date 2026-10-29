@@ -113,6 +113,12 @@ test('countLines: one per non-empty stderr line', () => {
   assert.strictEqual(countLines(undefined), 0);
 });
 
+test('firstErrors: Windows ffprobe prints the context address without 0x', () => {
+  assert.deepStrictEqual(firstErrors('[h264 @ 0000025e00d66440] error while decoding MB 2 67, bytestream -8\n', 3),
+    ['h264: error while decoding MB 2 67, bytestream -8']);
+  assert.deepStrictEqual(firstErrors('[h264 @ 0x55d1ffc77a00] mmco: unref short failure', 1), ['h264: mmco: unref short failure']);
+});
+
 test('firstErrors: first n non-empty lines, [name @ addr] rewritten to name:, capped at 200 characters', () => {
   const err = '[h264 @ 0x55d1ffc77a00] error while decoding MB 2 67, bytestream -8\r\n\r\n  plain line  \n   \n[mov,mp4 @ 0xabc] second\n[h264 @ 0x1] fourth\n';
   assert.deepStrictEqual(firstErrors(err, 2), ['h264: error while decoding MB 2 67, bytestream -8', 'plain line']);

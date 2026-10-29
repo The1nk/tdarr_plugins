@@ -38,7 +38,7 @@
   - `checkFile`: cover art only → skipped; standard rate → clean in 1 call (`--all` → 2 calls); odd rate steady → clean with the exact listing call; a 4 s hole → `vfr` with the exact decode call; the hole with decode errors → `damaged` with the plugin's text and `firstErrors`; cover art at index 0 → listing uses stream 1; the runner receives `{ timeoutMs: minutes * 60000 }`; every ffprobe failure text (exit, not started, no JSON, signal, too few timestamps, decode); `(timed out after 7 min)`; an overflowed call (`overflow: true`) is `(output cap): ffprobe output exceeded 1000 bytes`, not "not started"; multi-line stderr becomes one line.
   - `collectFiles` (real temp folders): extension filter and sort order, explicit files of any extension, missing path → `not found`, duplicates; paths normalised with `path.resolve` (mixed slashes, relative, case on Windows) and a file given directly and inside a given folder is listed once under its first spelling; a file and a symlink to it are listed once under the first spelling (`t.skip` if file links can't be created); a junction to another folder is followed and a junction back to the parent does not loop (`t.skip` if links can't be created); a folder whose `readdirSync` throws (`t.mock.method`) is a one-line problem and the rest is still collected.
   - `summarise`: the exact lines for damaged + errors + not-found paths (singular/plural), exit codes 1/3/0.
-  - `main` (fake runner, captured `out`/`err`): usage and exit 2/0; unknown option; unusable ffprobe (not started, exit) → exit 2, nothing else printed, only the `-version` call; no video files → 2; damaged → `Found 2 video files.`, tab-separated progress lines, summary, Damaged section, exit 1; `Found 1 video file.`; missing path → exit 3 and ` 1 path not found.`; unreadable file → exit 3 with a one-line detail; damaged beats errors; a runner that throws → `ERROR` line; the same file given three ways → 1; concurrency never exceeds `-j` (2 and 1); Ctrl+C (`deps.onInterrupt`/`deps.exit`/`deps.killChildren` stubs) prints `Interrupted.` and one summary, exits 130; a call that ends with status 3221225786 is not reported, whether it comes after the handler ran or before it (then the scan stops and the interrupt routine runs itself); the handler kills the children in `liveChildren` (a `kill` spy).
+  - `main` (fake runner, captured `out`/`err`): usage and exit 2/0; unknown option; unusable ffprobe (not started, exit) → exit 2, nothing else printed, only the `-version` call; no video files → 2; damaged → `Found 2 video files.`, tab-separated progress lines, summary, Damaged section, exit 1; `Found 1 video file.`; missing path → exit 3 and ` 1 path not found.`; unreadable file → exit 3 with a one-line detail; damaged beats errors; a runner that throws → `ERROR` line; the same file given three ways → 1; concurrency never exceeds `-j` (2 and 1); Ctrl+C (`deps.onInterrupt`/`deps.exit`/`deps.killChildren` stubs) prints `Interrupted.` and one summary, exits 130; a call that ends with status 3221225786 is not reported, whether it comes after the handler ran or before it (then the interrupt routine runs at once, and with `-j 2` a sibling worker's pending call is never printed: one exit 130, one summary); the handler kills the children in `liveChildren` (a `kill` spy).
   - `runTool` (real Node child): status/stdout/stderr and a missing tool; a child killed by `timeoutMs: 200` has `timedOut` and a `signal`; a quick child is not timed out; output beyond `maxBytes: 1000` kills it with `error.message === 'ffprobe output exceeded 1000 bytes'` and `overflow: true` (stdout and stderr); exit status 3221225786 sets `interrupted` (Windows); `liveChildren` holds the child while it runs.
 
 - [ ] **Step 2: Run them, see them fail** — `node --test tests/check_video.test.js` fails with `Cannot find module …tools/check-video.js`.
@@ -203,7 +203,7 @@ const keyOf = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
 const walk = (dir, files, problems, visited) => {
   let real = dir;
   try {
-    real = fs.realpathSync(dir);
+    real = fs.realpathSync.native(dir);
   } catch (e) {
     // fall back to the path itself; readdir below reports the real problem
   }
@@ -259,7 +259,7 @@ const collectFiles = (paths) => {
     files: files.filter((f) => {
       let real = path.resolve(f);
       try {
-        real = fs.realpathSync(f);
+        real = fs.realpathSync.native(f);
       } catch (e) {
         // keep the resolved path
       }
@@ -377,7 +377,6 @@ const main = async (argv, deps) => {
   let next = 0;
   let done = 0;
   let interrupted = false;
-  let stopping = false; // a call ended with Ctrl+C's exit status
   const interrupt = () => {
     if (interrupted) return;
     interrupted = true;
@@ -388,7 +387,7 @@ const main = async (argv, deps) => {
   };
   const off = d.onInterrupt(interrupt);
   const worker = async () => {
-    while (!interrupted && !stopping && next < files.length) {
+    while (!interrupted && next < files.length) {
       const file = files[next++];
       let hit = false;
       const run = async (cmd, args, ropts) => {
@@ -402,18 +401,20 @@ const main = async (argv, deps) => {
       } catch (e) {
         r = { file, verdict: 'error', detail: oneLine(e.message) };
       }
-      if (hit) stopping = true;
-      if (interrupted || hit) return;
+      if (hit) interrupt(); // Ctrl+C reached an ffprobe before node's own handler ran
+      if (interrupted) return;
       results.push(r);
       done++;
       d.out('[' + done + '/' + files.length + '] ' + LABEL[r.verdict].padEnd(7) + ' ' + r.file + '\t' + r.detail);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(o.jobs, files.length) }, worker));
-  if (stopping) interrupt();
-  if (typeof off === 'function') off();
-  if (interrupted) return 130;
-  return summarise(results, files.length, d.out);
+  try {
+    await Promise.all(Array.from({ length: Math.min(o.jobs, files.length) }, worker));
+    if (interrupted) return 130;
+    return summarise(results, files.length, d.out);
+  } finally {
+    if (typeof off === 'function') off();
+  }
 };
 
 if (require.main === module) {

@@ -9,7 +9,7 @@ const details = () => {
     Type: "Video",
     Operation: "Transcode",
     Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe, and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing, the error count and the first decoder error. The file is only read, never changed. The timestamp listing reads (demuxes) the whole file for every file whose frame rate is not standard. The decode runs only when there are gaps; it reads and decodes the whole file using all cores, and can take several minutes on long or 4K files.`,
-    Version: "1.00",
+    Version: "1.01",
     Tags: "pre-processing,ffprobe,video only",
     Inputs: [],
   };
@@ -118,10 +118,10 @@ var countLines = function (text) {
   return String(text || '').split(/\r?\n/).filter(function (line) { return line.trim() !== ''; }).length;
 };
 
-// The first n non-empty stderr lines, "[h264 @ 0x55d1ffc77a00] msg" rewritten to "h264: msg", each cut to 200 characters.
+// The first n non-empty stderr lines, "[h264 @ 0x55d1ffc77a00] msg" (Windows: no 0x) rewritten to "h264: msg", each cut to 200 characters.
 var firstErrors = function (stderr, n) {
   return String(stderr || '').split(/\r?\n/)
-    .map(function (line) { return line.trim().replace(/^\[([^\]@]*?)\s*@\s*0x[0-9a-fA-F]+\]\s*/, '$1: ').slice(0, 200); })
+    .map(function (line) { return line.trim().replace(/^\[([^\]@]*?)\s*@\s*(?:0x)?[0-9a-fA-F]+\]\s*/, '$1: ').slice(0, 200); })
     .filter(function (line) { return line !== ''; })
     .slice(0, n);
 };

@@ -40,8 +40,8 @@ node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <fil
   with a library video extension are checked: `mkv mp4 mov m4v mpg mpeg avi flv webm wmv vob evo m2ts
   m2t mts ts` (case-insensitive). Every path is made absolute with `path.resolve`. A file reached more than
   once (given twice, with different slashes or case on Windows, or given and also inside a given folder) is
-  checked once, under its first spelling. Files are de-duplicated by real path (`realpath`, lower-cased on
-  Windows), so a file and a link to it are checked once. The walk follows symbolic links and junctions (a link is
+  checked once, under its first spelling. Files are de-duplicated by real path (`fs.realpathSync.native`, one system call per file, lower-cased on
+  Windows; the walk's visited-folder set uses it too), so a file and a link to it are checked once. The walk follows symbolic links and junctions (a link is
   `stat`ed and treated as a folder or file by its target) and remembers the real path of every folder it
   has walked, so links that loop or overlap are not walked twice. A folder that can't be read, or a link
   to a video that can't be followed, is reported as an error. Paths that don't exist are listed under
@@ -69,7 +69,9 @@ node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <fil
   `Interrupted.` and the summary of the results so far (same format), then exits 130. In a console
   Ctrl+C also reaches ffprobe, which on Windows exits with status 3221225786 (`STATUS_CONTROL_C_EXIT`):
   such a call is treated as an interrupt, not as an error. Its file is not recorded or printed, no new
-  file is started, and if node's own SIGINT handler has not run yet the same interrupt routine runs.
+  file is started, and if node's own SIGINT handler has not run yet the same interrupt routine runs
+  at once (it kills the other workers' ffprobes, prints the summary, exits 130; it runs only once). The
+  SIGINT listener is removed in a `finally`.
 - **Robustness:** if stdout is closed early (EPIPE, e.g. piped into `head`) it exits quietly; an
   unexpected exception prints its message to stderr and exits 2.
 - **ffprobe:** `--ffprobe <path>`, default `ffprobe` on PATH.
