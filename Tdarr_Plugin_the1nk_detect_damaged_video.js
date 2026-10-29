@@ -118,7 +118,88 @@ var countLines = function (text) {
   return String(text || '').split(/\r?\n/).filter(function (line) { return line.trim() !== ''; }).length;
 };
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+var plugin = function (file, librarySettings, inputs, otherArguments) {
+  var lib = require('../methods/lib')();
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars,no-param-reassign
+  inputs = lib.loadDefaultValues(inputs, details);
+  var fs = require('fs');
+  var spawnSync = require('child_process').spawnSync;
+
+  var response = {
+    file: file,
+    removeFromDB: false,
+    updateDB: false,
+    infoLog: '',
+    processFile: false,
+    preset: '',
+    container: '.' + file.container,
+    handBrakeMode: false,
+    FFmpegMode: false,
+  };
+
+  // A badly damaged file can print thousands of error lines; leave room so maxBuffer never trips.
+  var run = function (cmd, args) {
+    return spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  };
+  var exitOf = function (r) { return r.signal ? 'signal ' + r.signal : 'exit ' + r.status; };
+  var why = function (r) { return r.error ? r.error.message : (r.stderr || r.stdout || exitOf(r)); };
+
+  try {
+    var video = pickVideo(file.ffProbeData && file.ffProbeData.streams);
+    if (!video) {
+      response.infoLog += 'No video stream found, skipping.\r\n';
+      return response;
+    }
+    var rate = video.r_frame_rate;
+    if (STD.indexOf(rate) !== -1) {
+      response.infoLog += 'Frame rate already standard (' + rate + '), skipping.\r\n';
+      return response;
+    }
+
+    var ffprobe = pickFfprobe((otherArguments || {}).ffmpegPath, fs.existsSync);
+    var stream = typeof video.index === 'number' ? String(video.index) : 'v:0';
+
+    var list = run(ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
+      '-of', 'csv=p=0', '--', file._id]);
+    if (list.error || list.status !== 0) {
+      throw new Error('ffprobe could not list the video timestamps (' + exitOf(list) + '): ' + why(list));
+    }
+    var g = findGaps(parseTimes(list.stdout));
+    if (!g.gaps.length) {
+      response.infoLog += 'Frame rate ' + rate + ' is not standard, but the frame timing is steady (no gaps). Continuing.\r\n';
+      return response;
+    }
+
+    // Decode every frame. ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a
+    // variable-rate file's timestamps: every stderr line is a decoder error.
+    var dec = run(ffprobe, ['-v', 'error', '-select_streams', stream, '-count_frames',
+      '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', file._id]);
+    if (dec.error || dec.status !== 0) {
+      throw new Error('ffprobe could not decode the video (' + exitOf(dec) + '): ' + why(dec));
+    }
+    var errors = countLines(dec.stderr);
+    if (errors === 0) {
+      response.infoLog += 'Frame rate ' + rate + ': ' + describeGaps(g)
+        + ', but the video decodes cleanly, so it was made variable-frame-rate on purpose. Continuing.\r\n';
+      return response;
+    }
+
+    var msg = damagedMessage(g, errors);
+    response.infoLog += msg + '\r\n';
+    response.error = msg;
+    return response;
+  } catch (err) {
+    console.log(err);
+    response.infoLog += 'Error: ' + err.message + '\r\n';
+    // Letting the file through unchecked would defeat the check, so fail the job with the reason.
+    response.error = 'Detect damaged video: ' + err.message;
+    return response;
+  }
+};
+
 module.exports.details = details;
+module.exports.plugin = plugin;
 // Pure helpers, exported for tests/detect_damaged_video.test.js. Tdarr only uses details and plugin.
 module.exports._test = {
   STD: STD,

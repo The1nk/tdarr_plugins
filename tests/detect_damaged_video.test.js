@@ -133,3 +133,103 @@ test('pickVideo: first video stream that is not cover art', () => {
   assert.strictEqual(pickVideo([streams[0], streams[1]]), undefined);
   assert.strictEqual(pickVideo(undefined), undefined);
 });
+
+// --- plugin(), with ffprobe stubbed ---
+
+const csv = (times) => times.map((t) => t.toFixed(6)).join('\n') + '\n';
+const steady = csv(grid(0, 240));
+const holed = csv(grid(0, 120).concat(grid(216, 240)));
+const LIST_ARGS = ['-v', 'error', '-select_streams', '0', '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', '--', '/m/a.mkv'];
+const DECODE_ARGS = ['-v', 'error', '-select_streams', '0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', '/m/a.mkv'];
+
+const run = (cfg) => {
+  const c = Object.assign({
+    streams: [{ index: 0, codec_type: 'video', r_frame_rate: '7016/301' }, { index: 1, codec_type: 'audio' }],
+    listing: { status: 0, stdout: steady, stderr: '' },
+    decode: { status: 0, stdout: '144\n', stderr: '' },
+  }, cfg);
+  const calls = [];
+  stubs = {
+    fs: { existsSync: () => false },
+    child_process: {
+      spawnSync: (cmd, args) => {
+        calls.push([cmd].concat(args));
+        if (args.includes('packet=pts_time')) return c.listing;
+        if (args.includes('-count_frames')) return c.decode;
+        throw new Error('unexpected call: ' + cmd + ' ' + args.join(' '));
+      },
+    },
+  };
+  try {
+    const file = { _id: '/m/a.mkv', file: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: c.streams } };
+    const res = pluginModule.plugin(file, {}, {}, { cacheFilePath: '/w/a.mkv', ffmpegPath: 'tdarr-ffmpeg', mkvpropeditPath: 'mkvpropedit' });
+    return { res, calls, file };
+  } finally {
+    stubs = null;
+  }
+};
+
+test('plugin: no video stream (only cover art) -> continues without running anything', () => {
+  const { res, calls } = run({ streams: [{ index: 0, codec_type: 'video', r_frame_rate: '90000/1', disposition: { attached_pic: 1 } }] });
+  assert.strictEqual(res.error, undefined);
+  assert.strictEqual(res.infoLog, 'No video stream found, skipping.\r\n');
+  assert.deepStrictEqual(calls, []);
+});
+
+test('plugin: standard frame rate -> continues without running anything', () => {
+  const { res, calls } = run({ streams: [{ index: 0, codec_type: 'video', r_frame_rate: '24000/1001' }] });
+  assert.strictEqual(res.error, undefined);
+  assert.strictEqual(res.infoLog, 'Frame rate already standard (24000/1001), skipping.\r\n');
+  assert.deepStrictEqual(calls, []);
+});
+
+test('plugin: odd rate with steady timing -> one timestamp listing, no decode, continues', () => {
+  const { res, calls, file } = run({});
+  assert.strictEqual(res.error, undefined);
+  assert.strictEqual(res.infoLog, 'Frame rate 7016/301 is not standard, but the frame timing is steady (no gaps). Continuing.\r\n');
+  assert.deepStrictEqual(calls, [['ffprobe'].concat(LIST_ARGS)]);
+  assert.strictEqual(res.processFile, false);
+  assert.strictEqual(res.file, file);
+});
+
+test('plugin: probes the video stream by its index, past cover art', () => {
+  const { calls } = run({ streams: [
+    { index: 0, codec_type: 'video', r_frame_rate: '90000/1', disposition: { attached_pic: 1 } },
+    { index: 1, codec_type: 'video', r_frame_rate: '7016/301' },
+  ] });
+  assert.deepStrictEqual(calls[0].slice(3, 5), ['-select_streams', '1']);
+});
+
+test('plugin: gaps that decode cleanly are deliberate VFR -> continues', () => {
+  const { res, calls } = run({ listing: { status: 0, stdout: holed, stderr: '' } });
+  assert.strictEqual(res.error, undefined);
+  assert.strictEqual(res.infoLog, 'Frame rate 7016/301: 1 timing gap (largest 4.04s at 00:04), about 4.0s of video missing, '
+    + 'but the video decodes cleanly, so it was made variable-frame-rate on purpose. Continuing.\r\n');
+  assert.deepStrictEqual(calls, [['ffprobe'].concat(LIST_ARGS), ['ffprobe'].concat(DECODE_ARGS)]);
+});
+
+test('plugin: gaps plus decoder errors fail the job with the reason', () => {
+  const stderr = '[h264 @ 0x1] Missing reference picture, default is 0\n[h264 @ 0x1] mmco: unref short failure\n';
+  const { res, file } = run({ listing: { status: 0, stdout: holed, stderr: '' }, decode: { status: 0, stdout: '144\n', stderr } });
+  const msg = 'Damaged video: 1 timing gap (largest 4.04s at 00:04), about 4.0s of video missing, and 2 decode errors. '
+    + 'The source is missing frames; replace it with a clean copy.';
+  assert.strictEqual(res.error, msg);
+  assert.strictEqual(res.infoLog, msg + '\r\n');
+  assert.strictEqual(res.processFile, false);
+  assert.strictEqual(res.file, file);
+});
+
+test('plugin: a failed timestamp listing fails the job', () => {
+  const { res } = run({ listing: { status: 1, stdout: '', stderr: 'Invalid data found when processing input' } });
+  assert.strictEqual(res.error, 'Detect damaged video: ffprobe could not list the video timestamps (exit 1): Invalid data found when processing input');
+});
+
+test('plugin: ffprobe that cannot be started fails the job', () => {
+  const { res } = run({ listing: { error: new Error('spawnSync ffprobe ENOENT'), status: null, signal: null } });
+  assert.match(res.error, /^Detect damaged video: ffprobe could not list the video timestamps \(.*\): spawnSync ffprobe ENOENT$/);
+});
+
+test('plugin: a killed decode fails the job', () => {
+  const { res } = run({ listing: { status: 0, stdout: holed, stderr: '' }, decode: { status: null, signal: 'SIGKILL', stdout: '', stderr: '' } });
+  assert.strictEqual(res.error, 'Detect damaged video: ffprobe could not decode the video (signal SIGKILL): signal SIGKILL');
+});
