@@ -82,3 +82,13 @@ test('migz remux: a real-format TS record (audio first, 0/0 video later) is remu
   assert.strictEqual(res.preset, '-fflags +genpts, -map 0 -c copy -max_muxing_queue_size 9999 -map -0:d ');
   assert.strictEqual(res.container, '.mkv');
 });
+
+test('migz remux: the log line names the frame rate that was read', () => {
+  const zero = run({ container: 'mkv', fileMedium: 'audio', ffProbeData: { streams: [video({ avg_frame_rate: '0/0' })] } });
+  assert.ok(zero.infoLog.includes('☒Tdarr labels this file audio (its video frame rate reads 0/0). Remuxing so later steps see a video. \n'), zero.infoLog);
+  const other = run({ container: 'mkv', fileMedium: 'audio', ffProbeData: { streams: [video({ avg_frame_rate: '24/1' })] } });
+  assert.strictEqual(other.processFile, true);
+  assert.ok(other.infoLog.includes('☒Tdarr labels this file audio (its video frame rate reads 24/1). Remuxing so later steps see a video. \n'), other.infoLog);
+  const none = run({ container: 'mkv', fileMedium: 'audio', ffProbeData: { streams: [video()] } });
+  assert.ok(none.infoLog.includes('reads unknown)'), none.infoLog);
+});

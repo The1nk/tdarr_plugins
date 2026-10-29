@@ -35,9 +35,9 @@
   // the1nk: Tdarr labels a file "audio" when its video stream's average frame rate reads 0/0 (seen on some
   // MPEG-TS captures), so also trust a real (non-cover-art) video stream in ffprobe's data.
   const probeStreams = (file.ffProbeData && file.ffProbeData.streams) || [];
-  const hasVideoStream = probeStreams.some((s) => s.codec_type === 'video'
+  const realVideoStream = probeStreams.find((s) => s.codec_type === 'video'
     && !(s.disposition && s.disposition.attached_pic));
-  if (file.fileMedium !== 'video' && !hasVideoStream) {
+  if (file.fileMedium !== 'video' && !realVideoStream) {
     response.processFile = false;
     response.infoLog += '☒File is not a video. \n';
     return response;
@@ -50,7 +50,7 @@
 
 ```js
   if (file.fileMedium !== 'video' && file.container === inputs.container) {
-    response.infoLog += '☒Tdarr labels this file audio (its video frame rate reads 0/0). Remuxing so later steps see a video. \n';
+    response.infoLog += `☒Tdarr labels this file audio (its video frame rate reads ${realVideoStream.avg_frame_rate || 'unknown'}). Remuxing so later steps see a video. \n`;
     convert = true;
     genpts = '-fflags +genpts';
   } else if (file.container !== inputs.container) {

@@ -28,8 +28,8 @@ the `TDARR_DRC_PROCESSED` tag, so running them through the flow again would comp
   `file.fileMedium === 'video'` **or** ffprobe lists a video stream that isn't cover art
   (`codec_type === 'video'` and not `disposition.attached_pic`). A file labelled audio that has such a stream
   is remuxed even when its container already matches (an `.mkv` that probes `0/0`), with `-fflags +genpts`
-  and the log line "Tdarr labels this file audio (its video frame rate reads 0/0). Remuxing so later steps
-  see a video."; the remux re-derives the frame rate. Everything else is unchanged; it already
+  and the log line "Tdarr labels this file audio (its video frame rate reads <avg_frame_rate of the first such
+  stream, or 'unknown'>). Remuxing so later steps see a video."; the remux re-derives the frame rate. Everything else is unchanged; it already
   adds `-fflags +genpts` for `ts` input. Once the working file is an MKV, Tdarr rescans it before each
   later plugin, and the rest of the flow sees a normal MKV video. The README's "Local copies of community
   plugins" section notes that this copy is now modified.
