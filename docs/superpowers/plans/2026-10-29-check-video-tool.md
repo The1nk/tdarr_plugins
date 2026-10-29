@@ -31,46 +31,15 @@
 - Create: `tools/check-video.js`
 - Create: `tests/check_video.test.js`
 
-- [ ] **Step 1: Write the failing tests** in `tests/check_video.test.js` (`node:test`, `node:assert`). Require the tool from `path.join(__dirname, '..', 'tools', 'check-video.js')`. Write a fake runner `fake(cfg)` returning `async (cmd, args) => …` that records `[cmd, ...args]` and answers by argument: `args.includes('stream=index,codec_type,r_frame_rate:stream_disposition=attached_pic')` → the stream probe result, `args.includes('packet=pts_time')` → the listing result, `args.includes('-count_frames')` → the decode result. Defaults: streams `[{ index: 0, codec_type: 'video', r_frame_rate: '7016/301', disposition: { attached_pic: 0 } }]`, a steady 24 fps listing, decode `{ status: 0, stdout: '144\n', stderr: '' }`. Use the same `grid`/`csv` helpers as `tests/detect_damaged_video.test.js` (24 fps at 1 ms: `Math.round((n / 24) * 1000) / 1000`). The tests, with exact expectations:
+- [x] **Step 1: Write the failing tests** in `tests/check_video.test.js` (`node:test`, `node:assert`; it is the file in the repo). Require the tool from `path.join(__dirname, '..', 'tools', 'check-video.js')`. A fake runner `fake(cfg)` returns `async (cmd, args) => …` that records `[cmd, ...args]` and answers by argument: `-version` → status 0, the stream probe (`stream=index,codec_type,r_frame_rate:stream_disposition=attached_pic`), the listing (`packet=pts_time`) and the decode (`-count_frames`), each overridable. Defaults: one video stream at `7016/301`, a steady 24 fps listing (`grid`/`csv` helpers as in `tests/detect_damaged_video.test.js`), decode `{ status: 0, stdout: '144\n', stderr: '' }`. Cases:
 
-  `parseArgs`:
-  - `[]` → `{ all: false, jobs: 2, ffprobe: 'ffprobe', paths: [], help: false }` (no `error` key).
-  - `['--all', '-j', '4', '--ffprobe', 'C:\\ff\\ffprobe.exe', 'a', 'b']` → all true, jobs 4, that ffprobe, paths `['a','b']`.
-  - `['--jobs', '0']` and `['-j', 'x']` → `error` is `'--jobs needs a whole number of at least 1'` / `'-j needs a whole number of at least 1'`.
-  - `['--ffprobe']` → error `'--ffprobe needs a path'`. `['--bogus']` → error `'unknown option --bogus'`.
-  - `['--', '-odd.mkv']` → paths `['-odd.mkv']`. `['-h']` and `['--help']` → help true.
-
-  `checkFile(file, opts, run)` with `opts = { all: false, ffprobe: 'ffprobe' }`, file `'/v/a.mkv'`:
-  - only cover art → `{ file, verdict: 'skipped', detail: 'no video stream' }`, 1 call.
-  - rate `24000/1001` → verdict `clean`, detail `'standard frame rate 24000/1001'`, 1 call; with `all: true` → 2 calls (listing made), detail `'frame rate 24000/1001, steady timing (no gaps)'`.
-  - odd rate, steady → `clean`, detail `'frame rate 7016/301, steady timing (no gaps)'`, 2 calls; the listing call equals `['ffprobe','-v','error','-select_streams','0','-show_entries','packet=pts_time','-of','csv=p=0','--','/v/a.mkv']`.
-  - listing with a 4 s hole (`grid(0,120)` + `grid(216,240)`), clean decode → verdict `vfr`, detail `'frame rate 7016/301: 1 timing gap (largest 4.04s at 00:04), about 4.0s of video missing, but the video decodes cleanly (variable frame rate on purpose)'`; the decode call equals `['ffprobe','-v','repeat+error','-threads','0','-select_streams','0','-count_frames','-show_entries','stream=nb_read_frames','-of','csv=p=0','--','/v/a.mkv']`.
-  - same hole, decode stderr `'[h264 @ 0x1] Missing reference picture, default is 0\n[h264 @ 0x1] mmco: unref short failure\n'` → verdict `damaged`, detail `'Damaged video: 1 timing gap (largest 4.04s at 00:04), about 4.0s of video missing, and 2 decode errors. The source is missing frames; replace it with a clean copy.'`, `firstErrors` `['h264: Missing reference picture, default is 0', 'h264: mmco: unref short failure']`.
-  - cover art at index 0 then video at index 1 → the listing call uses `'-select_streams', '1'`.
-  - stream probe `{ status: 1, stdout: '', stderr: 'Invalid data found when processing input\n' }` → `error`, detail `'ffprobe could not read the file (exit 1): Invalid data found when processing input'`.
-  - stream probe `{ error: new Error('spawn ffprobe ENOENT'), status: null, signal: null, stdout: '', stderr: '' }` → detail `'ffprobe could not read the file (not started): spawn ffprobe ENOENT'`.
-  - stream probe stdout `'not json'` with status 0 → `error`, detail `'ffprobe returned no JSON'`.
-  - listing `{ status: null, signal: 'SIGKILL', stdout: '', stderr: '' }` → detail `'ffprobe could not list the video timestamps (signal SIGKILL): no output'`.
-  - listing `'N/A\n'` → `error`, detail `'ffprobe listed too few usable video timestamps (0 found)'`.
-  - decode `{ status: 1, stdout: '', stderr: 'boom' }` → detail `'ffprobe could not decode the video (exit 1): boom'`.
-
-  `collectFiles(paths)` with a real temp folder (`fs.mkdtempSync(path.join(os.tmpdir(), 'cv-'))`, removed in `after`): create `show/S1/E1.MKV`, `show/S1/E2.mp4`, `show/S1/E2.nfo`, `show/E3.m2t`, `show/cover.jpg`, and `loose.txt`.
-  - `collectFiles([show])` → files exactly `[show/E3.m2t, show/S1/E1.MKV, show/S1/E2.mp4]` (sorted by name within each folder, folders walked in name order), problems `[]`.
-  - `collectFiles([loose.txt])` → files `[loose.txt]` (explicit files are checked whatever the extension).
-  - `collectFiles([missing])` → files `[]`, problems `[{ file: missing, verdict: 'error', detail: 'not found' }]`.
-  - The same file given twice is listed once.
-
-  `main(argv, deps)` with `deps = { run, out, err }` capturing lines into arrays:
-  - `[]` → returns 2, `err` got the usage text (starts with `'Usage: node tools/check-video.js'`).
-  - `['--help']` → returns 0, usage on `out`.
-  - `['--bogus']` → returns 2, `err` has `'unknown option --bogus'` then the usage.
-  - a temp folder with only `notes.nfo` → returns 2, `err` has `'No video files found.'`.
-  - a temp folder with `a.mkv` (fake: steady) and `b.mkv` (fake: damaged as above; branch on the file path, the last argument) → returns 1. `out` has two progress lines matching `/^\[[12]\/2\] (CLEAN|DAMAGED) +.*[ab]\.mkv - /`, then `''`, then `'Checked 2 files: 1 clean, 0 deliberate VFR, 1 damaged, 0 errors, 0 skipped.'`, then `''`, `'Damaged:'`, `'  ' + b.mkv`, `'    Damaged video: …'` (the exact detail), `'    First decoder errors:'`, `'      h264: Missing reference picture, default is 0'`, `'      h264: mmco: unref short failure'`.
-  - all clean → returns 0 and no `Damaged:` section.
-  - a missing path plus a clean file → returns 1; the summary counts 1 error; an `'Errors:'` section lists `'  <missing>: not found'`.
-  - concurrency: 5 files, `-j 2`, a run stub that waits 20 ms per call and tracks how many checks are in flight → the maximum is exactly 2; with `-j 1` it is 1.
-
-  `runTool` with the real Node binary: `runTool(process.execPath, ['-e', 'process.stdout.write("hi");process.stderr.write("e");process.exit(3)'])` → `status 3`, `stdout 'hi'`, `stderr 'e'`; `runTool('no-such-tool-xyz', [])` → `error` set, `status null`.
+  - `oneLine` (splits on \r\n, \r, \n; trims; drops empty lines; joins with ` | `); `capLabel` (`'256 MB'`, `'1000 bytes'`).
+  - `parseArgs`: defaults `{ all: false, jobs: 2, timeout: 120, ffprobe: 'ffprobe', paths: [], help: false }`; every option; the errors (`--jobs`/`-j` need a whole number of at least 1, `--timeout needs a whole number of minutes (0 = none)` for `-1`, `x`, `1.5` and a missing value, `--ffprobe needs a path`, `unknown option --bogus`); `--timeout 0`; `--`; `-h`/`--help`.
+  - `checkFile`: cover art only → skipped; standard rate → clean in 1 call (`--all` → 2 calls); odd rate steady → clean with the exact listing call; a 4 s hole → `vfr` with the exact decode call; the hole with decode errors → `damaged` with the plugin's text and `firstErrors`; cover art at index 0 → listing uses stream 1; the runner receives `{ timeoutMs: minutes * 60000 }`; every ffprobe failure text (exit, not started, no JSON, signal, too few timestamps, decode); `(timed out after 7 min)`; multi-line stderr becomes one line.
+  - `collectFiles` (real temp folders): extension filter and sort order, explicit files of any extension, missing path → `not found`, duplicates; paths normalised with `path.resolve` (mixed slashes, relative, case on Windows) and a file given directly and inside a given folder is listed once under its first spelling; a junction to another folder is followed and a junction back to the parent does not loop (`t.skip` if links can't be created); a folder whose `readdirSync` throws (`t.mock.method`) is a one-line problem and the rest is still collected.
+  - `summarise`: the exact lines for damaged + errors + not-found paths (singular/plural), exit codes 1/3/0.
+  - `main` (fake runner, captured `out`/`err`): usage and exit 2/0; unknown option; unusable ffprobe (not started, exit) → exit 2, nothing else printed, only the `-version` call; no video files → 2; damaged → `Found 2 video files.`, tab-separated progress lines, summary, Damaged section, exit 1; `Found 1 video file.`; missing path → exit 3 and ` 1 path not found.`; unreadable file → exit 3 with a one-line detail; damaged beats errors; a runner that throws → `ERROR` line; the same file given three ways → 1; concurrency never exceeds `-j` (2 and 1); Ctrl+C (`deps.onInterrupt`/`deps.exit` stubs) prints `Interrupted.` and one summary, exits 130.
+  - `runTool` (real Node child): status/stdout/stderr and a missing tool; a child killed by `timeoutMs: 200` has `timedOut` and a `signal`; a quick child is not timed out; output beyond `maxBytes: 1000` kills it with `error.message === 'ffprobe output exceeded 1000 bytes'` (stdout and stderr).
 
 - [ ] **Step 2: Run them, see them fail** — `node --test tests/check_video.test.js` fails with `Cannot find module …tools/check-video.js`.
 
@@ -79,7 +48,7 @@
 ```js
 #!/usr/bin/env node
 // Checks video files for missing frames with the Detect Damaged Video plugin's rules.
-// Usage: node tools/check-video.js [--all] [-j N] [--ffprobe <path>] <file or folder>...
+// Usage: node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <file or folder>...
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -90,38 +59,90 @@ const EXTENSIONS = ['mkv', 'mp4', 'mov', 'm4v', 'mpg', 'mpeg', 'avi', 'flv', 'we
   'm2ts', 'm2t', 'mts', 'ts'];
 
 const USAGE = [
-  'Usage: node tools/check-video.js [--all] [-j N] [--ffprobe <path>] <file or folder>...',
+  'Usage: node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <file or folder>...',
   '  --all          also check the timing of files whose frame rate is standard',
   '  -j, --jobs N   files to check at once (default 2)',
+  '  --timeout MIN  give up on one ffprobe call after MIN minutes (default 120, 0 = never)',
   '  --ffprobe P    ffprobe to use (default: ffprobe on PATH)',
 ].join('\n');
 
 const LABEL = { clean: 'CLEAN', vfr: 'VFR', damaged: 'DAMAGED', error: 'ERROR', skipped: 'SKIPPED' };
+const NOT_FOUND = 'not found';
+const MAX_BYTES = 256 * 1024 * 1024; // the plugin's maxBuffer
+const DEFAULT_TIMEOUT_MIN = 120;
 
-// Runs a tool to completion: { status, signal, stdout, stderr, error }.
-const runTool = (cmd, args) => new Promise((resolve) => {
+// Error details are single lines: split on line breaks, trim, drop empty lines, join with " | ".
+const oneLine = (text) => String(text).split(/\r\n|\r|\n/).map((s) => s.trim()).filter(Boolean).join(' | ');
+
+const capLabel = (bytes) => (bytes >= 1024 * 1024 ? Math.round(bytes / (1024 * 1024)) + ' MB' : bytes + ' bytes');
+
+// Runs a tool to completion: { status, signal, stdout, stderr, error, timedOut }.
+// opts.timeoutMs (0 = none) kills it; opts.maxBytes caps each output stream.
+const runTool = (cmd, args, opts) => new Promise((resolve) => {
+  const o = Object.assign({ timeoutMs: 0, maxBytes: MAX_BYTES }, opts);
   let stdout = '';
   let stderr = '';
+  let outBytes = 0;
+  let errBytes = 0;
+  let settled = false;
+  let timedOut = false;
+  let timer = null;
+  const finish = (r) => {
+    if (settled) return;
+    settled = true;
+    if (timer) clearTimeout(timer);
+    resolve(r);
+  };
   const child = spawn(cmd, args, { windowsHide: true });
+  const overflow = () => {
+    child.kill();
+    finish({ error: new Error('ffprobe output exceeded ' + capLabel(o.maxBytes)), status: null, signal: null, stdout, stderr });
+  };
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stdout.on('data', (d) => { stdout += d; });
-  child.stderr.on('data', (d) => { stderr += d; });
-  child.on('error', (error) => resolve({ error, status: null, signal: null, stdout, stderr }));
-  child.on('close', (status, signal) => resolve({ status, signal, stdout, stderr }));
+  child.stdout.on('data', (d) => {
+    if (settled) return;
+    outBytes += Buffer.byteLength(d);
+    if (outBytes > o.maxBytes) overflow();
+    else stdout += d;
+  });
+  child.stderr.on('data', (d) => {
+    if (settled) return;
+    errBytes += Buffer.byteLength(d);
+    if (errBytes > o.maxBytes) overflow();
+    else stderr += d;
+  });
+  child.on('error', (error) => finish({ error, status: null, signal: null, stdout, stderr }));
+  child.on('close', (status, signal) => {
+    const r = { status, signal, stdout, stderr };
+    if (timedOut) Object.assign(r, { signal: signal || 'SIGTERM', timedOut: true });
+    finish(r);
+  });
+  if (o.timeoutMs > 0) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, o.timeoutMs);
+  }
 });
 
 const failed = (r) => !!r.error || r.status !== 0;
 // "(exit 1): <last lines of the output>"
-const why = (r) => '(' + (r.error ? 'not started' : r.signal ? 'signal ' + r.signal : 'exit ' + r.status) + '): '
-  + rules.tail(r.error ? r.error.message : (r.stderr || r.stdout || 'no output'));
+const why = (r, minutes) => {
+  const how = r.timedOut ? 'timed out after ' + minutes + ' min'
+    : r.error ? 'not started' : r.signal ? 'signal ' + r.signal : 'exit ' + r.status;
+  return '(' + how + '): ' + rules.tail(r.error ? r.error.message : (r.stderr || r.stdout || 'no output'));
+};
 
 // The plugin's checks, on one file: { file, verdict, detail, firstErrors? }.
 const checkFile = async (file, opts, run) => {
-  const result = (verdict, detail, extra) => Object.assign({ file, verdict, detail }, extra);
-  const probe = await run(opts.ffprobe, ['-v', 'error', '-show_entries',
+  const minutes = opts.timeout === undefined ? DEFAULT_TIMEOUT_MIN : opts.timeout;
+  const call = (args) => run(opts.ffprobe, args, { timeoutMs: minutes * 60000 });
+  const result = (verdict, detail, extra) => Object.assign({ file, verdict,
+    detail: verdict === 'error' ? oneLine(detail) : detail }, extra);
+  const probe = await call(['-v', 'error', '-show_entries',
     'stream=index,codec_type,r_frame_rate:stream_disposition=attached_pic', '-of', 'json', '--', file]);
-  if (failed(probe)) return result('error', 'ffprobe could not read the file ' + why(probe));
+  if (failed(probe)) return result('error', 'ffprobe could not read the file ' + why(probe, minutes));
   let streams;
   try {
     streams = JSON.parse(probe.stdout).streams || [];
@@ -134,9 +155,9 @@ const checkFile = async (file, opts, run) => {
   if (rules.STD.indexOf(rate) !== -1 && !opts.all) return result('clean', 'standard frame rate ' + rate);
 
   const stream = String(video.index);
-  const list = await run(opts.ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
+  const list = await call(['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
     '-of', 'csv=p=0', '--', file]);
-  if (failed(list)) return result('error', 'ffprobe could not list the video timestamps ' + why(list));
+  if (failed(list)) return result('error', 'ffprobe could not list the video timestamps ' + why(list, minutes));
   const times = rules.parseTimes(list.stdout);
   if (times.length < 2) {
     return result('error', 'ffprobe listed too few usable video timestamps (' + times.length + ' found)');
@@ -144,9 +165,9 @@ const checkFile = async (file, opts, run) => {
   const g = rules.findGaps(times);
   if (!g.gaps.length) return result('clean', 'frame rate ' + rate + ', steady timing (no gaps)');
 
-  const dec = await run(opts.ffprobe, ['-v', 'repeat+error', '-threads', '0', '-select_streams', stream,
+  const dec = await call(['-v', 'repeat+error', '-threads', '0', '-select_streams', stream,
     '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', file]);
-  if (failed(dec)) return result('error', 'ffprobe could not decode the video ' + why(dec));
+  if (failed(dec)) return result('error', 'ffprobe could not decode the video ' + why(dec, minutes));
   const errors = rules.countLines(dec.stderr);
   if (errors === 0) {
     return result('vfr', 'frame rate ' + rate + ': ' + rules.describeGaps(g)
@@ -157,42 +178,78 @@ const checkFile = async (file, opts, run) => {
 
 const isVideo = (name) => EXTENSIONS.indexOf(path.extname(name).slice(1).toLowerCase()) !== -1;
 
-const walk = (dir, files, problems) => {
+// Windows paths are case-insensitive.
+const keyOf = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+
+// Folders already walked (by real path) are skipped, so links that loop can't run forever.
+const walk = (dir, files, problems, visited) => {
+  let real = dir;
+  try {
+    real = fs.realpathSync(dir);
+  } catch (e) {
+    // fall back to the path itself; readdir below reports the real problem
+  }
+  if (visited.has(keyOf(real))) return;
+  visited.add(keyOf(real));
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch (e) {
-    problems.push({ file: dir, verdict: 'error', detail: 'could not read the folder: ' + e.message });
+    problems.push({ file: dir, verdict: 'error', detail: oneLine('could not read the folder: ' + e.message) });
     return;
   }
   entries.sort((a, b) => a.name.localeCompare(b.name));
   entries.forEach((e) => {
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) walk(p, files, problems);
-    else if (e.isFile() && isVideo(e.name)) files.push(p);
+    let isDir = e.isDirectory();
+    let isFile = e.isFile();
+    if (e.isSymbolicLink()) {
+      try {
+        const st = fs.statSync(p);
+        isDir = st.isDirectory();
+        isFile = st.isFile();
+      } catch (err) {
+        if (isVideo(e.name)) problems.push({ file: p, verdict: 'error', detail: oneLine('could not follow the link: ' + err.message) });
+        return;
+      }
+    }
+    if (isDir) walk(p, files, problems, visited);
+    else if (isFile && isVideo(e.name)) files.push(p);
   });
 };
 
 // Files given explicitly are checked whatever their extension; folders are walked for video files.
+// Paths are made absolute, and a file reached twice is listed once (first spelling kept).
 const collectFiles = (paths) => {
   const files = [];
   const problems = [];
-  paths.forEach((p) => {
+  const visited = new Set();
+  paths.forEach((given) => {
+    const p = path.resolve(given);
     let st;
     try {
       st = fs.statSync(p);
     } catch (e) {
-      problems.push({ file: p, verdict: 'error', detail: 'not found' });
+      problems.push({ file: p, verdict: 'error', detail: NOT_FOUND });
       return;
     }
-    if (st.isDirectory()) walk(p, files, problems);
+    if (st.isDirectory()) walk(p, files, problems, visited);
     else files.push(p);
   });
-  return { files: Array.from(new Set(files)), problems };
+  const seen = new Set();
+  return {
+    files: files.filter((f) => {
+      const k = keyOf(path.resolve(f));
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    }),
+    problems,
+  };
 };
 
 const parseArgs = (argv) => {
-  const o = { all: false, jobs: 2, ffprobe: 'ffprobe', paths: [], help: false };
+  const o = { all: false, jobs: 2, timeout: DEFAULT_TIMEOUT_MIN, ffprobe: 'ffprobe', paths: [], help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--all') o.all = true;
@@ -201,6 +258,13 @@ const parseArgs = (argv) => {
       const n = Number(argv[++i]);
       if (!Number.isInteger(n) || n < 1) return Object.assign(o, { error: a + ' needs a whole number of at least 1' });
       o.jobs = n;
+    } else if (a === '--timeout') {
+      const raw = argv[++i];
+      const n = raw === undefined || raw === '' ? NaN : Number(raw);
+      if (!Number.isInteger(n) || n < 0) {
+        return Object.assign(o, { error: '--timeout needs a whole number of minutes (0 = none)' });
+      }
+      o.timeout = n;
     } else if (a === '--ffprobe') {
       if (argv[i + 1] === undefined) return Object.assign(o, { error: '--ffprobe needs a path' });
       o.ffprobe = argv[++i];
@@ -213,11 +277,54 @@ const parseArgs = (argv) => {
   return o;
 };
 
+const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+
+// Prints the summary of the results so far and returns the exit code (1 damaged, 3 errors, else 0).
+// `checked` is the number of files checked; paths that were not found are listed but not counted.
+const summarise = (results, checked, out) => {
+  const missing = results.filter((r) => r.verdict === 'error' && r.detail === NOT_FOUND).length;
+  const byFile = (a, b) => a.file.localeCompare(b.file);
+  const damaged = results.filter((r) => r.verdict === 'damaged').sort(byFile);
+  const errors = results.filter((r) => r.verdict === 'error').sort(byFile);
+  const count = (v) => results.filter((r) => r.verdict === v).length;
+  out('');
+  out('Checked ' + plural(checked, 'file') + ': ' + count('clean') + ' clean, ' + count('vfr') + ' deliberate VFR, '
+    + damaged.length + ' damaged, ' + plural(errors.length - missing, 'error') + ', ' + count('skipped') + ' skipped.'
+    + (missing ? ' ' + plural(missing, 'path') + ' not found.' : ''));
+  if (damaged.length) {
+    out('');
+    out('Damaged:');
+    damaged.forEach((r) => {
+      out('  ' + r.file);
+      out('    ' + r.detail);
+      if (r.firstErrors && r.firstErrors.length) {
+        out('    First decoder errors:');
+        r.firstErrors.forEach((line) => out('      ' + line));
+      }
+    });
+  }
+  if (errors.length) {
+    out('');
+    out('Errors:');
+    errors.forEach((r) => out('  ' + r.file + ': ' + r.detail));
+  }
+  if (damaged.length) return 1;
+  return errors.length ? 3 : 0;
+};
+
 const main = async (argv, deps) => {
   const d = Object.assign({
     run: runTool,
     out: (s) => process.stdout.write(s + '\n'),
     err: (s) => process.stderr.write(s + '\n'),
+    onInterrupt: (fn) => {
+      process.once('SIGINT', fn);
+      return () => process.removeListener('SIGINT', fn);
+    },
+    exit: (code) => {
+      process.exitCode = code;
+      process.stdout.write('', () => process.exit(code));
+    },
   }, deps);
   const o = parseArgs(argv);
   if (o.help) {
@@ -229,64 +336,59 @@ const main = async (argv, deps) => {
     d.err(USAGE);
     return 2;
   }
+  const version = await d.run(o.ffprobe, ['-version'], { timeoutMs: 60000 });
+  if (failed(version)) {
+    d.err('ffprobe is not usable ' + oneLine(why(version, 1)));
+    return 2;
+  }
   const { files, problems } = collectFiles(o.paths);
   if (!files.length && !problems.length) {
     d.err('No video files found.');
     return 2;
   }
+  d.out('Found ' + plural(files.length, 'video file') + '.');
 
   const results = problems.slice();
   let next = 0;
   let done = 0;
+  let interrupted = false;
+  const off = d.onInterrupt(() => {
+    interrupted = true;
+    d.out('Interrupted.');
+    summarise(results, done, d.out);
+    d.exit(130);
+  });
   const worker = async () => {
-    while (next < files.length) {
+    while (!interrupted && next < files.length) {
       const file = files[next++];
       let r;
       try {
         r = await checkFile(file, o, d.run);
       } catch (e) {
-        r = { file, verdict: 'error', detail: e.message };
+        r = { file, verdict: 'error', detail: oneLine(e.message) };
       }
+      if (interrupted) return;
       results.push(r);
       done++;
-      d.out('[' + done + '/' + files.length + '] ' + LABEL[r.verdict].padEnd(7) + ' ' + r.file + ' - ' + r.detail);
+      d.out('[' + done + '/' + files.length + '] ' + LABEL[r.verdict].padEnd(7) + ' ' + r.file + '\t' + r.detail);
     }
   };
   await Promise.all(Array.from({ length: Math.min(o.jobs, files.length) }, worker));
-
-  const byFile = (a, b) => a.file.localeCompare(b.file);
-  const count = (v) => results.filter((r) => r.verdict === v).length;
-  const damaged = results.filter((r) => r.verdict === 'damaged').sort(byFile);
-  const errors = results.filter((r) => r.verdict === 'error').sort(byFile);
-  d.out('');
-  d.out('Checked ' + files.length + ' ' + (files.length === 1 ? 'file' : 'files') + ': ' + count('clean') + ' clean, '
-    + count('vfr') + ' deliberate VFR, ' + damaged.length + ' damaged, ' + errors.length + ' errors, '
-    + count('skipped') + ' skipped.');
-  if (damaged.length) {
-    d.out('');
-    d.out('Damaged:');
-    damaged.forEach((r) => {
-      d.out('  ' + r.file);
-      d.out('    ' + r.detail);
-      if (r.firstErrors.length) {
-        d.out('    First decoder errors:');
-        r.firstErrors.forEach((line) => d.out('      ' + line));
-      }
-    });
-  }
-  if (errors.length) {
-    d.out('');
-    d.out('Errors:');
-    errors.forEach((r) => d.out('  ' + r.file + ': ' + r.detail));
-  }
-  return damaged.length || errors.length ? 1 : 0;
+  if (typeof off === 'function') off();
+  if (interrupted) return 130;
+  return summarise(results, files.length, d.out);
 };
 
 if (require.main === module) {
-  main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
+  // Output piped into something that closed early (e.g. Select-Object -First 1): stop quietly.
+  process.stdout.on('error', (e) => process.exit(e && e.code === 'EPIPE' ? 0 : 2));
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((e) => {
+    process.stderr.write((e && e.message ? e.message : String(e)) + '\n');
+    process.exitCode = 2;
+  });
 }
 
-module.exports = { EXTENSIONS, runTool, checkFile, collectFiles, parseArgs, main };
+module.exports = { EXTENSIONS, oneLine, capLabel, runTool, checkFile, collectFiles, parseArgs, summarise, main };
 ```
 
 - [ ] **Step 4: Run the tests** — `node --test tests/*.test.js`: fail 0.
@@ -310,26 +412,27 @@ module.exports = { EXTENSIONS, runTool, checkFile, collectFiles, parseArgs, main
 Checks video files that are already in the library (or anywhere else) for missing frames, with exactly the rules of [Detect Damaged Video](#tdarr_plugin_the1nk_detect_damaged_video): it loads that plugin and runs the same ffprobe checks. Run it on any PC with Node.js and ffprobe:
 
 ```bash
-node tools/check-video.js [--all] [-j N] [--ffprobe <path>] <file or folder>...
+node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <file or folder>...
 ```
 
-Folders are searched recursively for library video files (`mkv mp4 mov m4v mpg mpeg avi flv webm wmv vob evo m2ts m2t mts ts`); files named directly are checked whatever their extension. Each file gets one line as it finishes, then a summary lists the damaged files (with the first decoder errors) and any errors again.
+Folders are searched recursively for library video files (`mkv mp4 mov m4v mpg mpeg avi flv webm wmv vob evo m2ts m2t mts ts`); files named directly are checked whatever their extension. Links are followed (loops are detected), and a file given more than once is checked once. The tool prints `Found N video files.`, then one line per file as it finishes, `[i/n] LABEL   path<TAB>detail` (a tab, not " - ", separates the path from the detail, because library names contain " - "), then a summary line, then the damaged files (with the first decoder errors) and any errors again. Error details are always one line. Paths that do not exist are listed under Errors and counted separately (` 1 path not found.`). Press Ctrl+C to stop: it prints `Interrupted.` and the summary so far.
 
 | Verdict | Meaning |
 |---------|---------|
 | `CLEAN` | standard frame rate, or steady timing |
 | `VFR` | timing gaps, but the video decodes cleanly: variable frame rate on purpose |
 | `DAMAGED` | timing gaps and decoder errors: frames are missing; replace the file |
-| `ERROR` | ffprobe couldn't read the file, or the path doesn't exist |
+| `ERROR` | ffprobe couldn't read, list or decode the file, or timed out, or the output was too large |
 | `SKIPPED` | no video stream |
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--all` | off | also check the timing of files whose frame rate is standard (the plugin skips them; slower, but finds damage the plugin can't) |
 | `-j`, `--jobs` | `2` | files checked at once; every check reads the whole file, so a big library over the network takes hours |
-| `--ffprobe` | `ffprobe` on PATH | the ffprobe to use |
+| `--timeout` | `120` | minutes after which one ffprobe call is given up on and the file is reported as an error (`0` = never) |
+| `--ffprobe` | `ffprobe` on PATH | the ffprobe to use; it is tried with `-version` first, and the tool stops with exit code `2` if it does not run |
 
-Exit code: `0` if nothing is damaged and nothing failed, `1` if any file is damaged or failed, `2` for a usage error or when no video files were found.
+Exit code: `0` if nothing is damaged and nothing failed; `1` if any file is damaged; `3` if there were errors (including paths not found) but nothing is damaged; `2` for a usage error, when no video files were found, or when ffprobe does not run; `130` after Ctrl+C.
 
 ---
 ```
