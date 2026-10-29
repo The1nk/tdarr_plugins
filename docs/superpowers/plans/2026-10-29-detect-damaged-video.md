@@ -203,7 +203,7 @@ const details = () => {
     Name: "Detect damaged video",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe (this reads the whole file, without decoding it), and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing, the error count and the first decoder error. The file is only read, never changed. The timestamp listing reads (demuxes) the whole file for every file whose frame rate is not standard. The decode runs only when there are gaps; it reads and decodes the whole file using all cores, and can take several minutes on long or 4K files.`,
+    Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe, and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing, the error count and the first decoder error. The file is only read, never changed. The timestamp listing reads (demuxes) the whole file for every file whose frame rate is not standard. The decode runs only when there are gaps; it reads and decodes the whole file using all cores, and can take several minutes on long or 4K files.`,
     Version: "1.00",
     Tags: "pre-processing,ffprobe,video only",
     Inputs: [],
@@ -624,9 +624,9 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
 
     // Decode every frame. "repeat+" keeps ffmpeg from folding repeated errors into "Last message repeated
     // N times". "-threads 0" decodes on all cores (the error count is the same as with one thread, and
-    // single-threaded decoding of a long 1080p episode takes several minutes). ffprobe has no muxer (unlike
-    // "ffmpeg -f null"), so it never complains about a variable-rate file's timestamps: every stderr line is a
-    // decoder error.
+    // single-threaded decoding of a long 1080p episode takes several minutes). ffprobe has no muxer
+    // (unlike "ffmpeg -f null"), so it never complains about a variable-rate file's timestamps: every
+    // stderr line is a decoder error.
     var dec = run(ffprobe, ['-v', 'repeat+error', '-threads', '0', '-select_streams', stream, '-count_frames',
       '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', file._id]);
     if (dec.error || dec.status !== 0) {
@@ -1376,13 +1376,13 @@ Fails the job when the source video is missing frames, so a damaged download nev
 
 - **Gate:** only files whose video frame rate is not a standard one (`24000/1001`, `24/1`, `25/1`, `30000/1001`, `30/1`, `50/1`, `60000/1001`, `60/1`, `24000/1000`). Everything else passes through without being read. Only the first video stream that isn't cover art is checked.
 - **Timing gaps:** ffprobe lists the video packet timestamps. This reads (demuxes) the whole file for every file whose rate is not standard. The normal interval is the most common one; any interval of at least 1.5× normal is a gap.
-- **Decoder errors:** only when there are gaps, ffprobe decodes the video once (`-count_frames`, with repeated errors each counted) and counts the decoder errors. Frames cut out of the stream leave later frames pointing at pictures that no longer exist ("Missing reference picture"). The decode, which runs only when there are gaps, reads and decodes the whole file using all cores (`-threads 0`; the error counts are the same as with one thread), and can take several minutes on long or 4K files. The first decoder error lines are shown in the job log and the first one in the error.
+- **Decoder errors:** only when there are gaps, ffprobe decodes the video once (`-count_frames`, with repeated errors each counted) and counts the decoder errors. Frames cut out of the stream leave later frames pointing at pictures that no longer exist ("Missing reference picture"). The decode reads and decodes the whole file using all cores (`-threads 0`; the error counts are the same as with one thread), and can take several minutes on long or 4K files. The first decoder error lines are shown in the job log and the first one in the error.
 
 | Gaps | Decoder errors | Result |
 |------|----------------|--------|
 | none | (not checked) | continues |
 | yes | none | continues: the file was made variable-frame-rate on purpose (a still scene stored as one long frame) |
-| yes | yes | **job fails**, e.g. `Damaged video: 7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy. First error: h264: reference picture missing during reorder` The job log also lists up to 5 decoder error lines under `First decoder errors:` |
+| yes | yes | **job fails**, e.g. `Damaged video: 1 timing gap (largest 1.29s at 14:53), about 1.3s of video missing, and 1 decode error. The source is missing frames; replace it with a clean copy. First error: h264: error while decoding MB 2 67, bytestream -8` (from Dr. STONE S01E03). The job log also lists up to 5 decoder error lines under `First decoder errors:` |
 
 The file is only read, never changed. If ffprobe can't run, the job fails too, because passing the file unchecked would defeat the check. It uses Tdarr's bundled ffprobe, else one next to an absolute `ffmpegPath`, else `ffprobe` on PATH. Damage cut cleanly at keyframes leaves no decoder errors and isn't detected; neither is damage in a file whose rate is still standard. In a flow, put it **first** (see [Ordering rules](#ordering-rules)).
 

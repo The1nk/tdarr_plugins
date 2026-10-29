@@ -84,7 +84,8 @@ their rate is non-standard. The decode reads and decodes the whole file, which c
      to the info log, followed by `First decoder errors:` and up to 5 stderr lines, each on its own line
      indented by two spaces, with the `[h264 @ 0x55d1ffc77a00] ` context rewritten to `h264: ` and each
      line cut to 200 characters. The error also carries the first line:
-     `Damaged video: 7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy. First error: h264: reference picture missing during reorder`
+     `Damaged video: 1 timing gap (largest 1.29s at 14:53), about 1.3s of video missing, and 1 decode error. The source is missing frames; replace it with a clean copy. First error: h264: error while decoding MB 2 67, bytestream -8`
+     (a real message, from Dr. STONE S01E03).
      Position format `mm:ss`, or `h:mm:ss` from one hour. Missing time has one decimal, or two below
      1 s (`about 0.04s`).
 - Tools: only ffprobe, found the same way as Convert Unsupported Subtitles (bundled ffprobe, then one
