@@ -127,15 +127,15 @@ Already-processed files are skipped via a `TDARR_DRC_PROCESSED` metadata tag.
 
 Fails the job when the source video is missing frames, so a damaged download never replaces the library file. The known case is downloads with whole seconds of video cut out: the player freezes on the last frame until the next one arrives, and the frame rate comes out odd (a 24 fps episode missing 209 frames reported `7016/301` = 23.309 fps).
 
-- **Gate:** only files whose video frame rate is not a standard one (`24000/1001`, `24/1`, `25/1`, `30000/1001`, `30/1`, `50/1`, `60000/1001`, `60/1`, `24000/1000`). Everything else passes through without being read.
-- **Timing gaps:** ffprobe lists the video packet timestamps. The normal interval is the most common one; any interval of at least 1.5× normal is a gap. If ffprobe lists fewer than 2 usable timestamps, the job fails.
-- **Decoder errors:** only when there are gaps, ffprobe decodes the video once (`-count_frames`, with repeated errors each counted) and counts the decoder errors. Frames cut out of the stream leave later frames pointing at pictures that no longer exist ("Missing reference picture"). Decoding reads the whole file, so on a file with gaps this step can take a few minutes.
+- **Gate:** only files whose video frame rate is not a standard one (`24000/1001`, `24/1`, `25/1`, `30000/1001`, `30/1`, `50/1`, `60000/1001`, `60/1`, `24000/1000`). Everything else passes through without being read. Only the first video stream that isn't cover art is checked.
+- **Timing gaps:** ffprobe lists the video packet timestamps. This reads (demuxes) the whole file for every file whose rate is not standard. The normal interval is the most common one; any interval of at least 1.5× normal is a gap. If ffprobe lists fewer than 2 usable timestamps, the job fails.
+- **Decoder errors:** only when there are gaps, ffprobe decodes the video once (`-count_frames`, with repeated errors each counted) and counts the decoder errors. Frames cut out of the stream leave later frames pointing at pictures that no longer exist ("Missing reference picture"). The decode, which runs only when there are gaps, reads and decodes the whole file using all cores (`-threads 0`; the error counts are the same as with one thread), and can take several minutes on long or 4K files. The first decoder error lines are shown in the job log and the first one in the error.
 
 | Gaps | Decoder errors | Result |
 |------|----------------|--------|
 | none | (not checked) | continues |
 | yes | none | continues: the file was made variable-frame-rate on purpose (a still scene stored as one long frame) |
-| yes | yes | **job fails**, e.g. `Damaged video: 7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy.` |
+| yes | yes | **job fails**, e.g. `Damaged video: 7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy. First error: h264: reference picture missing during reorder` The job log also lists up to 5 decoder error lines under `First decoder errors:` |
 
 The file is only read, never changed. If ffprobe can't run or fails, the job fails too, because passing the file unchecked would defeat the check; the error shows the last 20 lines (at most 2000 characters) of ffprobe's output. It uses Tdarr's bundled ffprobe, else one next to an absolute `ffmpegPath`, else `ffprobe` on PATH. Damage cut cleanly at keyframes leaves no decoder errors and isn't detected; neither is damage in a file whose rate is still standard. In a flow, put it **first** (see [Ordering rules](#ordering-rules)).
 
@@ -164,8 +164,8 @@ No inputs.
 
 Fixes MKVs that stutter on the Fire TV 4K Max because their declared frame rate is a *near-miss* of a standard one (e.g. `23185/967`, `22178/925`, `21171/883`, all ≈23.976 but not exact). This is the flow version of `Repair-FrameRate.ps1` from the Movie framerate fixer scripts:
 
-- **Gate:** MKV only, and the video rate must be non-standard but within `max_delta_fps` of a standard rate. Real odd rates like `500/21` or `1000/33` play fine and are left alone, because changing them would change playback speed.
-- **Gaps:** the video packet timestamps are listed first (the plugin also checks first that it runs in a flow, i.e. has a `cacheFilePath`). If the timing has gaps (frames missing; the same 1.5× rule as Detect Damaged Video), the file is skipped and the gaps are logged: a constant rate would close them by sliding the video out of sync with the audio. If ffprobe lists fewer than 2 usable timestamps, the timing can't be checked and the repair is skipped too.
+- **Gate:** MKV only, it must be running in a flow (it needs `cacheFilePath`), and the video rate must be non-standard but within `max_delta_fps` of a standard rate. Only the first video stream that isn't cover art is checked. Real odd rates like `500/21` or `1000/33` play fine and are left alone, because changing them would change playback speed.
+- **Gaps:** the video packet timestamps are listed with ffprobe first. If the timing has gaps (frames missing; the same 1.5× rule as Detect Damaged Video), the file is skipped and the gaps are logged: a constant rate would close them by sliding the video out of sync with the audio. If ffprobe lists fewer than 2 usable timestamps, the timing can't be checked and the repair is skipped too.
 - **Repair:** `mkvmerge --default-duration <track>:<nearest standard>p --fix-bitstream-timing-information <track>:1`. Streams are copied: no re-encode, and tags, attachments and chapters are kept.
 - **Verify:** the rate must be corrected; codec, pixel format and video packet count must be unchanged; and duration must be within 1s (the same video stream the gap check used is probed). If any check fails, the repaired file is deleted and the original continues down the flow untouched.
 

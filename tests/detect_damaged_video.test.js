@@ -17,7 +17,7 @@ Module._load = function (request, parent, isMain) {
 
 const pluginModule = require(path.join(__dirname, '..', 'Tdarr_Plugin_the1nk_detect_damaged_video.js'));
 const {
-  parseTimes, findGaps, clock, describeGaps, damagedMessage, countLines, tail, pickFfprobe, pickVideo,
+  parseTimes, findGaps, clock, describeGaps, damagedMessage, countLines, firstErrors, tail, pickFfprobe, pickVideo,
 } = pluginModule._test;
 
 // 24 fps timestamps at a 1 ms timebase (41/42 ms steps, like Matroska), frames [from, to).
@@ -113,6 +113,17 @@ test('countLines: one per non-empty stderr line', () => {
   assert.strictEqual(countLines(undefined), 0);
 });
 
+test('firstErrors: first n non-empty lines, [name @ addr] rewritten to name:, capped at 200 characters', () => {
+  const err = '[h264 @ 0x55d1ffc77a00] error while decoding MB 2 67, bytestream -8\r\n\r\n  plain line  \n   \n[mov,mp4 @ 0xabc] second\n[h264 @ 0x1] fourth\n';
+  assert.deepStrictEqual(firstErrors(err, 2), ['h264: error while decoding MB 2 67, bytestream -8', 'plain line']);
+  assert.deepStrictEqual(firstErrors(err, 1), ['h264: error while decoding MB 2 67, bytestream -8']);
+  assert.deepStrictEqual(firstErrors(err, 5), ['h264: error while decoding MB 2 67, bytestream -8', 'plain line', 'mov,mp4: second', 'h264: fourth']);
+  assert.deepStrictEqual(firstErrors('', 3), []);
+  assert.deepStrictEqual(firstErrors(undefined, 3), []);
+  assert.strictEqual(firstErrors('[h264 @ 0x1] ' + 'x'.repeat(300), 1)[0].length, 200);
+  assert.strictEqual(firstErrors('y'.repeat(300), 1)[0], 'y'.repeat(200));
+});
+
 test('tail: short text is unchanged; long text keeps the last 20 lines and 2000 characters', () => {
   assert.strictEqual(tail('a\nb\n'), 'a\nb');
   const lines = Array.from({ length: 25 }, (_, n) => 'line ' + (n + 1));
@@ -147,7 +158,7 @@ const csv = (times) => times.map((t) => t.toFixed(6)).join('\n') + '\n';
 const steady = csv(grid(0, 240));
 const holed = csv(grid(0, 120).concat(grid(216, 240)));
 const LIST_ARGS = ['-v', 'error', '-select_streams', '0', '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', '--', '/m/a.mkv'];
-const DECODE_ARGS = ['-v', 'repeat+error', '-select_streams', '0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', '/m/a.mkv'];
+const DECODE_ARGS = ['-v', 'repeat+error', '-threads', '0', '-select_streams', '0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', '/m/a.mkv'];
 
 const run = (cfg) => {
   const c = Object.assign({
@@ -220,8 +231,8 @@ test('plugin: gaps plus decoder errors fail the job with the reason', () => {
   const { res, file } = run({ listing: { status: 0, stdout: holed, stderr: '' }, decode: { status: 0, stdout: '144\n', stderr } });
   const msg = 'Damaged video: 1 timing gap (largest 4.04s at 00:04), about 4.0s of video missing, and 2 decode errors. '
     + 'The source is missing frames; replace it with a clean copy.';
-  assert.strictEqual(res.error, msg);
-  assert.strictEqual(res.infoLog, msg + '\r\n');
+  assert.strictEqual(res.error, msg + ' First error: h264: Missing reference picture, default is 0');
+  assert.strictEqual(res.infoLog, msg + '\r\nFirst decoder errors:\r\n  h264: Missing reference picture, default is 0\r\n  h264: mmco: unref short failure\r\n');
   assert.strictEqual(res.processFile, false);
   assert.strictEqual(res.file, file);
 });

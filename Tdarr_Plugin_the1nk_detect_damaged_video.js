@@ -8,7 +8,7 @@ const details = () => {
     Name: "Detect damaged video",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe, and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing and the error count. The file is only read, never changed. Decoding reads the whole file, so on a file with gaps this step can take a few minutes.`,
+    Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe (this reads the whole file, without decoding it), and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing, the error count and the first decoder error. The file is only read, never changed. The timestamp listing reads (demuxes) the whole file for every file whose frame rate is not standard. The decode runs only when there are gaps; it reads and decodes the whole file using all cores, and can take several minutes on long or 4K files.`,
     Version: "1.00",
     Tags: "pre-processing,ffprobe,video only",
     Inputs: [],
@@ -118,6 +118,14 @@ var countLines = function (text) {
   return String(text || '').split(/\r?\n/).filter(function (line) { return line.trim() !== ''; }).length;
 };
 
+// The first n non-empty stderr lines, "[h264 @ 0x55d1ffc77a00] msg" rewritten to "h264: msg", each cut to 200 characters.
+var firstErrors = function (stderr, n) {
+  return String(stderr || '').split(/\r?\n/)
+    .map(function (line) { return line.trim().replace(/^\[([^\]@]*?)\s*@\s*0x[0-9a-fA-F]+\]\s*/, '$1: ').slice(0, 200); })
+    .filter(function (line) { return line !== ''; })
+    .slice(0, n);
+};
+
 // Last 20 non-empty lines and at most 2000 characters of tool output, so an error or log stays readable.
 var tail = function (text) {
   var lines = String(text || '').split(/\r?\n/).filter(function (line) { return line.trim() !== ''; });
@@ -195,9 +203,10 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
     }
 
     // Decode every frame. "repeat+" keeps ffmpeg from folding repeated errors into "Last message repeated
-    // N times". ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a variable-rate
+    // N times". "-threads 0" decodes on all cores (the error count is the same as with one thread, and
+    // single-threaded decoding of a long 1080p episode takes several minutes). ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a variable-rate
     // file's timestamps: every stderr line is a decoder error.
-    var dec = run(ffprobe, ['-v', 'repeat+error', '-select_streams', stream, '-count_frames',
+    var dec = run(ffprobe, ['-v', 'repeat+error', '-threads', '0', '-select_streams', stream, '-count_frames',
       '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', file._id]);
     if (dec.error || dec.status !== 0) {
       throw new Error('ffprobe could not decode the video (' + exitOf(dec) + '): ' + why(dec));
@@ -210,8 +219,9 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
     }
 
     var msg = damagedMessage(g, errors);
-    response.infoLog += msg + '\r\n';
-    response.error = msg;
+    response.infoLog += msg + '\r\nFirst decoder errors:\r\n'
+      + firstErrors(dec.stderr, 5).map(function (line) { return '  ' + line + '\r\n'; }).join('');
+    response.error = msg + ' First error: ' + firstErrors(dec.stderr, 1)[0];
     return response;
   } catch (err) {
     console.log(err);
@@ -235,5 +245,6 @@ module.exports._test = {
   describeGaps: describeGaps,
   damagedMessage: damagedMessage,
   countLines: countLines,
+  firstErrors: firstErrors,
   tail: tail,
 };

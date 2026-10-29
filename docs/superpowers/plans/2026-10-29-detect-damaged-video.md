@@ -19,7 +19,7 @@
 - How flows run classic plugins (Tdarr node, `FlowHelpers/1.0.0/classicPlugins.js`): `otherArguments` = `{ handbrakePath, ffmpegPath, mkvpropeditPath, originalLibraryFile, nodeHardwareType, pluginCycle, workerType, version, platform_arch_isdocker, cacheFilePath, job }`. If the result has `error`, the runner throws `Plugin <path> failed: <error>` and the job fails. `ffmpegPath` is `tdarr-ffmpeg` on this node; the bundled ffprobe is `/app/Tdarr_Node/assets/app/ffmpeg/linux_x64/ffprobe`.
 - Measured facts this plan relies on (Tdarr node, ffprobe/ffmpeg 7.1.4-Jellyfin):
   - `ffprobe -v error -select_streams <i> -count_frames -show_entries stream=nb_read_frames -of csv=p=0 -- <file>` decodes every frame, exits 0 even when the decoder reports errors, and prints one stderr line per decoder error. `ffmpeg -i f -f null -` is NOT usable: its null muxer prints "non monotonically increasing dts" lines for clean variable-rate MKVs.
-  - Fixture results (stable across runs; `-threads 1` only pins the encoded bytes, as a precaution, because the decode error count does not depend on decoder or encoder threading; measured on ffmpeg 7.1.4-Jellyfin): `clean.mkv` rate `24/1`; `steady.mkv` rate `72/5`, no gaps; `vfr.mkv` rate `72/5`, one 4042 ms gap after 4.958 s, 0 decode errors; `damaged.mkv` rate `72/5`, gaps of 83 ms at 4.917 s and 4000 ms at 5.000 s, 3 decode errors. `near.mkv` (x264 at 24000/1001, remuxed by `mkvmerge --default-duration 0:23185/967p`) reads as `23185/967`, has steady timing, and repairs to `24000/1001` with 240 packets.
+  - Fixture results (stable across runs; `-threads 1` only pins the encoded bytes, as a precaution; Detect decodes with `-threads 0` and the error counts do not depend on threading (3 runs each at `-threads 1` and `-threads 0`: 0 errors for `vfr.mkv`, 3 for `damaged.mkv`); measured on ffmpeg 7.1.4-Jellyfin): `clean.mkv` rate `24/1`; `steady.mkv` rate `72/5`, no gaps; `vfr.mkv` rate `72/5`, one 4042 ms gap after 4.958 s, 0 decode errors; `damaged.mkv` rate `72/5`, gaps of 83 ms at 4.917 s and 4000 ms at 5.000 s, 3 decode errors. `near.mkv` (x264 at 24000/1001, remuxed by `mkvmerge --default-duration 0:23185/967p`) reads as `23185/967`, has steady timing, and repairs to `24000/1001` with 240 packets.
   - Flow JSON files use CRLF line endings except the final `}`, which ends with a bare `\n`. `JSON.stringify(obj, null, 2).replace(/\n/g, '\r\n') + '\n'` reproduces all ten files byte for byte.
 - The gap code (`parseTimes`, `findGaps`, `clock`, `plural`, `describeGaps`) must be **identical text** in both plugin files (each plugin stands alone). Tests compare the two copies' behaviour.
 
@@ -203,7 +203,7 @@ const details = () => {
     Name: "Detect damaged video",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe, and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing and the error count. The file is only read, never changed. Decoding reads the whole file, so on a file with gaps this step can take a few minutes.`,
+    Description: `Fails the job when the video stream is missing frames, so a damaged download never replaces the library file. Only files whose video frame rate is not a standard one are checked (frames lost from a 24 fps file give odd rates like 7016/301). Their video timestamps are listed with ffprobe (this reads the whole file, without decoding it), and an interval of at least 1.5x the normal frame interval counts as a gap. If there are gaps, the video is decoded once: frames cut out of the stream leave decoder errors ("Missing reference picture"), while a file made variable-frame-rate on purpose (a still scene stored as one long frame) decodes cleanly and is let through. Gaps plus decoder errors fail the job with the number of gaps, the largest one and where it is, the time missing, the error count and the first decoder error. The file is only read, never changed. The timestamp listing reads (demuxes) the whole file for every file whose frame rate is not standard. The decode runs only when there are gaps; it reads and decodes the whole file using all cores, and can take several minutes on long or 4K files.`,
     Version: "1.00",
     Tags: "pre-processing,ffprobe,video only",
     Inputs: [],
@@ -354,9 +354,20 @@ EOF
 
 - [ ] **Step 1: Write the failing tests**
 
-First add `tail` to the destructured import at the top of the test file (`..., countLines, tail, pickFfprobe, pickVideo,`) and this test after the `countLines` test:
+First add `firstErrors` and `tail` to the destructured import at the top of the test file (`..., countLines, firstErrors, tail, pickFfprobe, pickVideo,`) and these tests after the `countLines` test:
 
 ```js
+test('firstErrors: first n non-empty lines, [name @ addr] rewritten to name:, capped at 200 characters', () => {
+  const err = '[h264 @ 0x55d1ffc77a00] error while decoding MB 2 67, bytestream -8\r\n\r\n  plain line  \n   \n[mov,mp4 @ 0xabc] second\n[h264 @ 0x1] fourth\n';
+  assert.deepStrictEqual(firstErrors(err, 2), ['h264: error while decoding MB 2 67, bytestream -8', 'plain line']);
+  assert.deepStrictEqual(firstErrors(err, 1), ['h264: error while decoding MB 2 67, bytestream -8']);
+  assert.deepStrictEqual(firstErrors(err, 5), ['h264: error while decoding MB 2 67, bytestream -8', 'plain line', 'mov,mp4: second', 'h264: fourth']);
+  assert.deepStrictEqual(firstErrors('', 3), []);
+  assert.deepStrictEqual(firstErrors(undefined, 3), []);
+  assert.strictEqual(firstErrors('[h264 @ 0x1] ' + 'x'.repeat(300), 1)[0].length, 200);
+  assert.strictEqual(firstErrors('y'.repeat(300), 1)[0], 'y'.repeat(200));
+});
+
 test('tail: short text is unchanged; long text keeps the last 20 lines and 2000 characters', () => {
   assert.strictEqual(tail('a\nb\n'), 'a\nb');
   const lines = Array.from({ length: 25 }, (_, n) => 'line ' + (n + 1));
@@ -374,7 +385,7 @@ const csv = (times) => times.map((t) => t.toFixed(6)).join('\n') + '\n';
 const steady = csv(grid(0, 240));
 const holed = csv(grid(0, 120).concat(grid(216, 240)));
 const LIST_ARGS = ['-v', 'error', '-select_streams', '0', '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', '--', '/m/a.mkv'];
-const DECODE_ARGS = ['-v', 'repeat+error', '-select_streams', '0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', '/m/a.mkv'];
+const DECODE_ARGS = ['-v', 'repeat+error', '-threads', '0', '-select_streams', '0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', '/m/a.mkv'];
 
 const run = (cfg) => {
   const c = Object.assign({
@@ -447,8 +458,8 @@ test('plugin: gaps plus decoder errors fail the job with the reason', () => {
   const { res, file } = run({ listing: { status: 0, stdout: holed, stderr: '' }, decode: { status: 0, stdout: '144\n', stderr } });
   const msg = 'Damaged video: 1 timing gap (largest 4.04s at 00:04), about 4.0s of video missing, and 2 decode errors. '
     + 'The source is missing frames; replace it with a clean copy.';
-  assert.strictEqual(res.error, msg);
-  assert.strictEqual(res.infoLog, msg + '\r\n');
+  assert.strictEqual(res.error, msg + ' First error: h264: Missing reference picture, default is 0');
+  assert.strictEqual(res.infoLog, msg + '\r\nFirst decoder errors:\r\n  h264: Missing reference picture, default is 0\r\n  h264: mmco: unref short failure\r\n');
   assert.strictEqual(res.processFile, false);
   assert.strictEqual(res.file, file);
 });
@@ -520,13 +531,21 @@ test('plugin: a missing frame rate is labelled unknown', () => {
 - [ ] **Step 2: Run the tests to verify the new ones fail**
 
 Run: `node --test tests/detect_damaged_video.test.js`
-Expected: the new `tail:` test and the `plugin:` tests FAIL with `pluginModule.plugin is not a function`; the Task 1 tests still pass.
+Expected: the new `firstErrors:` and `tail:` tests and the `plugin:` tests FAIL with `pluginModule.plugin is not a function`; the Task 1 tests still pass.
 
 - [ ] **Step 3: Write `plugin`**
 
 In `Tdarr_Plugin_the1nk_detect_damaged_video.js`, insert this between the `countLines` definition and `module.exports.details = details;`:
 
 ```js
+// The first n non-empty stderr lines, "[h264 @ 0x55d1ffc77a00] msg" rewritten to "h264: msg", each cut to 200 characters.
+var firstErrors = function (stderr, n) {
+  return String(stderr || '').split(/\r?\n/)
+    .map(function (line) { return line.trim().replace(/^\[([^\]@]*?)\s*@\s*0x[0-9a-fA-F]+\]\s*/, '$1: ').slice(0, 200); })
+    .filter(function (line) { return line !== ''; })
+    .slice(0, n);
+};
+
 // Last 20 non-empty lines and at most 2000 characters of tool output, so an error or log stays readable.
 var tail = function (text) {
   var lines = String(text || '').split(/\r?\n/).filter(function (line) { return line.trim() !== ''; });
@@ -604,9 +623,11 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
     }
 
     // Decode every frame. "repeat+" keeps ffmpeg from folding repeated errors into "Last message repeated
-    // N times". ffprobe has no muxer (unlike "ffmpeg -f null"), so it never complains about a variable-rate
-    // file's timestamps: every stderr line is a decoder error.
-    var dec = run(ffprobe, ['-v', 'repeat+error', '-select_streams', stream, '-count_frames',
+    // N times". "-threads 0" decodes on all cores (the error count is the same as with one thread, and
+    // single-threaded decoding of a long 1080p episode takes several minutes). ffprobe has no muxer (unlike
+    // "ffmpeg -f null"), so it never complains about a variable-rate file's timestamps: every stderr line is a
+    // decoder error.
+    var dec = run(ffprobe, ['-v', 'repeat+error', '-threads', '0', '-select_streams', stream, '-count_frames',
       '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', '--', file._id]);
     if (dec.error || dec.status !== 0) {
       throw new Error('ffprobe could not decode the video (' + exitOf(dec) + '): ' + why(dec));
@@ -619,8 +640,9 @@ var plugin = function (file, librarySettings, inputs, otherArguments) {
     }
 
     var msg = damagedMessage(g, errors);
-    response.infoLog += msg + '\r\n';
-    response.error = msg;
+    response.infoLog += msg + '\r\nFirst decoder errors:\r\n'
+      + firstErrors(dec.stderr, 5).map(function (line) { return '  ' + line + '\r\n'; }).join('');
+    response.error = msg + ' First error: ' + firstErrors(dec.stderr, 1)[0];
     return response;
   } catch (err) {
     console.log(err);
@@ -639,7 +661,7 @@ module.exports.details = details;
 module.exports.plugin = plugin;
 ```
 
-and add `tail: tail,` to the `module.exports._test = { … }` block (after `countLines`).
+and add `firstErrors: firstErrors,` and `tail: tail,` to the `module.exports._test = { … }` block (after `countLines`).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1038,7 +1060,7 @@ Create `tests/container/detect_damaged_video.itest.js`:
 ```js
 // Integration test: runs the real Detect Damaged Video and Repair Frame Rate plugins, with Tdarr's real
 // methods/lib, FFmpeg and ffprobe, against small videos it builds itself: clean, steady at an odd rate,
-// variable-frame-rate on purpose, and damaged (frames cut out of the encoded stream). Run it inside the
+// a steady near-miss (23185/967), variable-frame-rate on purpose, and damaged (frames cut out of the encoded stream). Run it inside the
 // tdarr-node container (see README "Tests"). It writes only under /tmp/itest.
 //
 // Stage the files (from the repo root, Git Bash; MSYS_NO_PATHCONV stops container paths being rewritten):
@@ -1092,8 +1114,10 @@ try {
   console.log('ffmpeg: ' + String(ver.stdout || ver.error).split(/\r?\n/)[0]);
 
   // The expected gap and error values below were measured on ffmpeg 7.1.4-Jellyfin. If Tdarr's ffmpeg changes,
-  // re-measure them. Fixtures: -threads 1 only pins x264's output bytes, as a precaution; the decode error
-  // count does not depend on decoder or encoder threading.
+  // re-measure them. Fixtures: -threads 1 only pins x264's output bytes, as a precaution. Detect decodes with
+  // -threads 0 (all cores); measured in the Tdarr node, the error counts do not depend on threading (3 runs each
+  // at -threads 1 and -threads 0: 0 errors for vfr.mkv, 3 for damaged.mkv), and single-threaded ffprobe took 334 s
+  // on a 24-minute 1080p episode, while threading cut a 180 s window from 45 s to 16 s.
   // Going through MP4 gives the gappy files an odd frame rate (72/5), like the real damaged downloads.
   const src = (rate) => ['-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=' + rate + ':duration=10'];
   const x264 = ['-c:v', 'libx264', '-threads', '1', '-pix_fmt', 'yuv420p'];
@@ -1110,7 +1134,7 @@ try {
   // Steady near-miss: 24000/1001 video whose track rate mkvmerge relabels as 23185/967 (about 23.976 fps, nonstandard).
   ffmpeg(src('24000/1001').concat(x264, [W('ntsc.mkv')]));
   const mm = run('mkvmerge', ['-o', W('near.mkv'), '--default-duration', '0:23185/967p', W('ntsc.mkv')]);
-  assert.ok(!mm.error && (mm.status === 0 || mm.status === 1),'mkvmerge failed: ' + mm.stdout + mm.stderr);
+  assert.ok(!mm.error && (mm.status === 0 || mm.status === 1), 'mkvmerge failed: ' + mm.stdout + mm.stderr);
 
   assert.strictEqual(rateOf(W('clean.mkv')), '24/1');
   assert.strictEqual(rateOf(W('near.mkv')), '23185/967');
@@ -1143,7 +1167,8 @@ try {
 
   res = check(W('damaged.mkv'));
   assert.strictEqual(res.error, 'Damaged video: 2 timing gaps (largest 4.00s at 00:05), about 4.0s of video missing, '
-    + 'and 3 decode errors. The source is missing frames; replace it with a clean copy.');
+    + 'and 3 decode errors. The source is missing frames; replace it with a clean copy. '
+    + 'First error: h264: reference picture missing during reorder');
 
   // Repair Frame Rate must not force a constant rate onto a file with gaps. 72/5 is 9.58 fps from
   // 24000/1001, so raise the near-miss limit to make it count as one.
@@ -1349,15 +1374,15 @@ Insert directly before the line ``#### `Tdarr_Plugin_the1nk_convert_unsupported_
 
 Fails the job when the source video is missing frames, so a damaged download never replaces the library file. The known case is downloads with whole seconds of video cut out: the player freezes on the last frame until the next one arrives, and the frame rate comes out odd (a 24 fps episode missing 209 frames reported `7016/301` = 23.309 fps).
 
-- **Gate:** only files whose video frame rate is not a standard one (`24000/1001`, `24/1`, `25/1`, `30000/1001`, `30/1`, `50/1`, `60000/1001`, `60/1`, `24000/1000`). Everything else passes through without being read.
-- **Timing gaps:** ffprobe lists the video packet timestamps. The normal interval is the most common one; any interval of at least 1.5× normal is a gap.
-- **Decoder errors:** only when there are gaps, ffprobe decodes the video once (`-count_frames`) and counts the decoder errors. Frames cut out of the stream leave later frames pointing at pictures that no longer exist ("Missing reference picture").
+- **Gate:** only files whose video frame rate is not a standard one (`24000/1001`, `24/1`, `25/1`, `30000/1001`, `30/1`, `50/1`, `60000/1001`, `60/1`, `24000/1000`). Everything else passes through without being read. Only the first video stream that isn't cover art is checked.
+- **Timing gaps:** ffprobe lists the video packet timestamps. This reads (demuxes) the whole file for every file whose rate is not standard. The normal interval is the most common one; any interval of at least 1.5× normal is a gap.
+- **Decoder errors:** only when there are gaps, ffprobe decodes the video once (`-count_frames`, with repeated errors each counted) and counts the decoder errors. Frames cut out of the stream leave later frames pointing at pictures that no longer exist ("Missing reference picture"). The decode, which runs only when there are gaps, reads and decodes the whole file using all cores (`-threads 0`; the error counts are the same as with one thread), and can take several minutes on long or 4K files. The first decoder error lines are shown in the job log and the first one in the error.
 
 | Gaps | Decoder errors | Result |
 |------|----------------|--------|
 | none | (not checked) | continues |
 | yes | none | continues: the file was made variable-frame-rate on purpose (a still scene stored as one long frame) |
-| yes | yes | **job fails**, e.g. `Damaged video: 7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy.` |
+| yes | yes | **job fails**, e.g. `Damaged video: 7 timing gaps (largest 4.17s at 04:00), about 8.7s of video missing, and 202 decode errors. The source is missing frames; replace it with a clean copy. First error: h264: reference picture missing during reorder` The job log also lists up to 5 decoder error lines under `First decoder errors:` |
 
 The file is only read, never changed. If ffprobe can't run, the job fails too, because passing the file unchecked would defeat the check. It uses Tdarr's bundled ffprobe, else one next to an absolute `ffmpegPath`, else `ffprobe` on PATH. Damage cut cleanly at keyframes leaves no decoder errors and isn't detected; neither is damage in a file whose rate is still standard. In a flow, put it **first** (see [Ordering rules](#ordering-rules)).
 
@@ -1379,7 +1404,7 @@ Change `**Repair Near-Miss Frame Rate** — v1.01 _(flow-only)_` to `**Repair Ne
 At the end of the `## Tests` section, after the existing integration test's code block, add:
 
 ````markdown
-Integration test for `Tdarr_Plugin_the1nk_detect_damaged_video` and Repair Frame Rate's gap check, run inside the `tdarr-node` container. It builds four 10-second test videos with `tdarr-ffmpeg` (clean; steady at an odd rate; variable-frame-rate on purpose; frames cut out of the stream) and checks each verdict and message exactly. It needs no media and only writes under `/tmp/itest`. Pass a real damaged file under `/media` as an extra argument to check that it's reported as damaged too:
+Integration test for `Tdarr_Plugin_the1nk_detect_damaged_video` and Repair Frame Rate's gap check, run inside the `tdarr-node` container. It builds five 10-second test videos with `tdarr-ffmpeg` (clean; steady at an odd rate; a steady near-miss, `23185/967`; variable-frame-rate on purpose; frames cut out of the stream) and checks each verdict and message exactly. It needs no media and only writes under `/tmp/itest`. Pass a real damaged file under `/media` as an extra argument to check that it's reported as damaged too:
 
 ```bash
 MSYS_NO_PATHCONV=1 docker exec tdarr-node sh -c 'rm -rf /tmp/itest && mkdir -p /tmp/itest/plugins/Local && ln -s /app/Tdarr_Node/assets/app/plugins/methods /tmp/itest/plugins/methods'

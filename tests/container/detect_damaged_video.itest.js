@@ -1,6 +1,6 @@
 // Integration test: runs the real Detect Damaged Video and Repair Frame Rate plugins, with Tdarr's real
 // methods/lib, FFmpeg and ffprobe, against small videos it builds itself: clean, steady at an odd rate,
-// variable-frame-rate on purpose, and damaged (frames cut out of the encoded stream). Run it inside the
+// a steady near-miss (23185/967), variable-frame-rate on purpose, and damaged (frames cut out of the encoded stream). Run it inside the
 // tdarr-node container (see README "Tests"). It writes only under /tmp/itest.
 //
 // Stage the files (from the repo root, Git Bash; MSYS_NO_PATHCONV stops container paths being rewritten):
@@ -54,8 +54,10 @@ try {
   console.log('ffmpeg: ' + String(ver.stdout || ver.error).split(/\r?\n/)[0]);
 
   // The expected gap and error values below were measured on ffmpeg 7.1.4-Jellyfin. If Tdarr's ffmpeg changes,
-  // re-measure them. Fixtures: -threads 1 only pins x264's output bytes, as a precaution; the decode error
-  // count does not depend on decoder or encoder threading.
+  // re-measure them. Fixtures: -threads 1 only pins x264's output bytes, as a precaution. Detect decodes with
+  // -threads 0 (all cores); measured in the Tdarr node, the error counts do not depend on threading (3 runs each
+  // at -threads 1 and -threads 0: 0 errors for vfr.mkv, 3 for damaged.mkv), and single-threaded ffprobe took 334 s
+  // on a 24-minute 1080p episode, while threading cut a 180 s window from 45 s to 16 s.
   // Going through MP4 gives the gappy files an odd frame rate (72/5), like the real damaged downloads.
   const src = (rate) => ['-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=' + rate + ':duration=10'];
   const x264 = ['-c:v', 'libx264', '-threads', '1', '-pix_fmt', 'yuv420p'];
@@ -72,7 +74,7 @@ try {
   // Steady near-miss: 24000/1001 video whose track rate mkvmerge relabels as 23185/967 (about 23.976 fps, nonstandard).
   ffmpeg(src('24000/1001').concat(x264, [W('ntsc.mkv')]));
   const mm = run('mkvmerge', ['-o', W('near.mkv'), '--default-duration', '0:23185/967p', W('ntsc.mkv')]);
-  assert.ok(!mm.error && (mm.status === 0 || mm.status === 1),'mkvmerge failed: ' + mm.stdout + mm.stderr);
+  assert.ok(!mm.error && (mm.status === 0 || mm.status === 1), 'mkvmerge failed: ' + mm.stdout + mm.stderr);
 
   assert.strictEqual(rateOf(W('clean.mkv')), '24/1');
   assert.strictEqual(rateOf(W('near.mkv')), '23185/967');
@@ -105,7 +107,8 @@ try {
 
   res = check(W('damaged.mkv'));
   assert.strictEqual(res.error, 'Damaged video: 2 timing gaps (largest 4.00s at 00:05), about 4.0s of video missing, '
-    + 'and 3 decode errors. The source is missing frames; replace it with a clean copy.');
+    + 'and 3 decode errors. The source is missing frames; replace it with a clean copy. '
+    + 'First error: h264: reference picture missing during reorder');
 
   // Repair Frame Rate must not force a constant rate onto a file with gaps. 72/5 is 9.58 fps from
   // 24000/1001, so raise the near-miss limit to make it count as one.
