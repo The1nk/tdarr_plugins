@@ -40,7 +40,8 @@ node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <fil
   with a library video extension are checked: `mkv mp4 mov m4v mpg mpeg avi flv webm wmv vob evo m2ts
   m2t mts ts` (case-insensitive). Every path is made absolute with `path.resolve`. A file reached more than
   once (given twice, with different slashes or case on Windows, or given and also inside a given folder) is
-  checked once, under its first spelling. The walk follows symbolic links and junctions (a link is
+  checked once, under its first spelling. Files are de-duplicated by real path (`realpath`, lower-cased on
+  Windows), so a file and a link to it are checked once. The walk follows symbolic links and junctions (a link is
   `stat`ed and treated as a folder or file by its target) and remembers the real path of every folder it
   has walked, so links that loop or overlap are not walked twice. A folder that can't be read, or a link
   to a video that can't be followed, is reported as an error. Paths that don't exist are listed under
@@ -53,7 +54,7 @@ node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <fil
 - **Timeout:** `--timeout MIN` (default 120, 0 = never; a whole number) kills one ffprobe call that runs
   longer; the file is reported as an error `(timed out after N min)` and the scan goes on.
 - **Output cap:** each of an ffprobe call's output streams is capped at 256 MB (the plugin's
-  `maxBuffer`). Beyond that the call is killed and the file is an error `ffprobe output exceeded 256 MB`.
+  `maxBuffer`). Beyond that the call is killed and the file is an error `(output cap): ffprobe output exceeded 256 MB`.
 - **Output:** `Found N video file(s).` after the folders are walked; then one line per file as it
   finishes, `[i/n] LABEL   path<TAB>detail` (label padded to 7; a tab, not " - ", separates path and
   detail because library names contain " - "); then a summary
@@ -64,8 +65,11 @@ node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <fil
 - **Exit code:** 0 if nothing is damaged and there are no errors; 1 if any file is damaged; 3 if there
   were errors (including paths not found) but nothing is damaged; 2 for usage errors, when no video
   files were found, or when ffprobe is unusable; 130 after Ctrl+C.
-- **Ctrl+C:** on SIGINT during the checks it prints `Interrupted.` and the summary of the results so far
-  (same format), then exits 130.
+- **Ctrl+C:** on SIGINT during the checks it kills the ffprobe processes still running, prints
+  `Interrupted.` and the summary of the results so far (same format), then exits 130. In a console
+  Ctrl+C also reaches ffprobe, which on Windows exits with status 3221225786 (`STATUS_CONTROL_C_EXIT`):
+  such a call is treated as an interrupt, not as an error. Its file is not recorded or printed, no new
+  file is started, and if node's own SIGINT handler has not run yet the same interrupt routine runs.
 - **Robustness:** if stdout is closed early (EPIPE, e.g. piped into `head`) it exits quietly; an
   unexpected exception prints its message to stderr and exits 2.
 - **ffprobe:** `--ffprobe <path>`, default `ffprobe` on PATH.
@@ -78,7 +82,8 @@ node tools/check-video.js [--all] [-j N] [--timeout MIN] [--ffprobe <path>] <fil
   argument parsing (including `--timeout`), summary text (singular and plural) and exit codes, `oneLine`,
   path normalisation and de-duplication, links and loops (real temp folders and junctions), a folder that
   can't be read, a runner that throws, the ffprobe check, timeouts and the output cap (real child
-  processes), Ctrl+C, and that concurrency never exceeds `-j`.
+  processes), the output-cap and Ctrl+C-status error texts, links to files, Ctrl+C (including a call that
+  ends with Ctrl+C's exit status, and killing the tracked children), and that concurrency never exceeds `-j`.
 - A real run on this PC: Dr. STONE S01E03 must be reported damaged with the same message as the plugin
   gave in the Tdarr node; a clean library episode must be reported clean.
 

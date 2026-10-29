@@ -22,13 +22,27 @@ const LABEL = { clean: 'CLEAN', vfr: 'VFR', damaged: 'DAMAGED', error: 'ERROR', 
 const NOT_FOUND = 'not found';
 const MAX_BYTES = 256 * 1024 * 1024; // the plugin's maxBuffer
 const DEFAULT_TIMEOUT_MIN = 120;
+// Windows' exit status for a process ended by Ctrl+C (STATUS_CONTROL_C_EXIT).
+const CONTROL_C = 3221225786;
+
+// The ffprobe processes running now, so Ctrl+C can stop them.
+const liveChildren = new Set();
+const killAll = () => {
+  liveChildren.forEach((c) => {
+    try {
+      c.kill();
+    } catch (e) {
+      // already gone
+    }
+  });
+};
 
 // Error details are single lines: split on line breaks, trim, drop empty lines, join with " | ".
 const oneLine = (text) => String(text).split(/\r\n|\r|\n/).map((s) => s.trim()).filter(Boolean).join(' | ');
 
 const capLabel = (bytes) => (bytes >= 1024 * 1024 ? Math.round(bytes / (1024 * 1024)) + ' MB' : bytes + ' bytes');
 
-// Runs a tool to completion: { status, signal, stdout, stderr, error, timedOut }.
+// Runs a tool to completion: { status, signal, stdout, stderr, error, timedOut, overflow, interrupted }.
 // opts.timeoutMs (0 = none) kills it; opts.maxBytes caps each output stream.
 const runTool = (cmd, args, opts) => new Promise((resolve) => {
   const o = Object.assign({ timeoutMs: 0, maxBytes: MAX_BYTES }, opts);
@@ -43,12 +57,14 @@ const runTool = (cmd, args, opts) => new Promise((resolve) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
+    liveChildren.delete(child);
     resolve(r);
   };
   const child = spawn(cmd, args, { windowsHide: true });
+  liveChildren.add(child);
   const overflow = () => {
     child.kill();
-    finish({ error: new Error('ffprobe output exceeded ' + capLabel(o.maxBytes)), status: null, signal: null, stdout, stderr });
+    finish({ error: new Error('ffprobe output exceeded ' + capLabel(o.maxBytes)), overflow: true, status: null, signal: null, stdout, stderr });
   };
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -68,6 +84,7 @@ const runTool = (cmd, args, opts) => new Promise((resolve) => {
   child.on('close', (status, signal) => {
     const r = { status, signal, stdout, stderr };
     if (timedOut) Object.assign(r, { signal: signal || 'SIGTERM', timedOut: true });
+    else if (status === CONTROL_C) r.interrupted = true;
     finish(r);
   });
   if (o.timeoutMs > 0) {
@@ -82,7 +99,8 @@ const failed = (r) => !!r.error || r.status !== 0;
 // "(exit 1): <last lines of the output>"
 const why = (r, minutes) => {
   const how = r.timedOut ? 'timed out after ' + minutes + ' min'
-    : r.error ? 'not started' : r.signal ? 'signal ' + r.signal : 'exit ' + r.status;
+    : r.overflow ? 'output cap'
+        : r.error ? 'not started' : r.signal ? 'signal ' + r.signal : 'exit ' + r.status;
   return '(' + how + '): ' + rules.tail(r.error ? r.error.message : (r.stderr || r.stdout || 'no output'));
 };
 
@@ -171,7 +189,7 @@ const walk = (dir, files, problems, visited) => {
 };
 
 // Files given explicitly are checked whatever their extension; folders are walked for video files.
-// Paths are made absolute, and a file reached twice is listed once (first spelling kept).
+// Paths are made absolute, and a file reached twice (or through a link) is listed once (first spelling kept).
 const collectFiles = (paths) => {
   const files = [];
   const problems = [];
@@ -191,7 +209,13 @@ const collectFiles = (paths) => {
   const seen = new Set();
   return {
     files: files.filter((f) => {
-      const k = keyOf(path.resolve(f));
+      let real = path.resolve(f);
+      try {
+        real = fs.realpathSync(f);
+      } catch (e) {
+        // keep the resolved path
+      }
+      const k = keyOf(real);
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
@@ -273,6 +297,7 @@ const main = async (argv, deps) => {
       process.once('SIGINT', fn);
       return () => process.removeListener('SIGINT', fn);
     },
+    killChildren: killAll,
     exit: (code) => {
       process.exitCode = code;
       process.stdout.write('', () => process.exit(code));
@@ -304,28 +329,40 @@ const main = async (argv, deps) => {
   let next = 0;
   let done = 0;
   let interrupted = false;
-  const off = d.onInterrupt(() => {
+  let stopping = false; // a call ended with Ctrl+C's exit status
+  const interrupt = () => {
+    if (interrupted) return;
     interrupted = true;
+    d.killChildren();
     d.out('Interrupted.');
     summarise(results, done, d.out);
     d.exit(130);
-  });
+  };
+  const off = d.onInterrupt(interrupt);
   const worker = async () => {
-    while (!interrupted && next < files.length) {
+    while (!interrupted && !stopping && next < files.length) {
       const file = files[next++];
+      let hit = false;
+      const run = async (cmd, args, ropts) => {
+        const res = await d.run(cmd, args, ropts);
+        if (res && (res.interrupted || res.status === CONTROL_C)) hit = true;
+        return res;
+      };
       let r;
       try {
-        r = await checkFile(file, o, d.run);
+        r = await checkFile(file, o, run);
       } catch (e) {
         r = { file, verdict: 'error', detail: oneLine(e.message) };
       }
-      if (interrupted) return;
+      if (hit) stopping = true;
+      if (interrupted || hit) return;
       results.push(r);
       done++;
       d.out('[' + done + '/' + files.length + '] ' + LABEL[r.verdict].padEnd(7) + ' ' + r.file + '\t' + r.detail);
     }
   };
   await Promise.all(Array.from({ length: Math.min(o.jobs, files.length) }, worker));
+  if (stopping) interrupt();
   if (typeof off === 'function') off();
   if (interrupted) return 130;
   return summarise(results, files.length, d.out);
@@ -340,4 +377,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { EXTENSIONS, oneLine, capLabel, runTool, checkFile, collectFiles, parseArgs, summarise, main };
+module.exports = { EXTENSIONS, liveChildren, killAll, oneLine, capLabel, runTool, checkFile, collectFiles, parseArgs, summarise, main };

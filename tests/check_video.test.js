@@ -6,7 +6,7 @@ const path = require('path');
 
 const tool = require(path.join(__dirname, '..', 'tools', 'check-video.js'));
 const {
-  runTool, checkFile, collectFiles, parseArgs, main, oneLine, summarise, capLabel,
+  runTool, checkFile, collectFiles, parseArgs, main, oneLine, summarise, capLabel, liveChildren,
 } = tool;
 
 // 24 fps timestamps at a 1 ms timebase (41/42 ms steps, like Matroska), frames [from, to).
@@ -572,8 +572,117 @@ test('runTool: stops a child whose output exceeds the cap', async () => {
     { maxBytes: 1000 });
   assert.ok(r.error);
   assert.strictEqual(r.error.message, 'ffprobe output exceeded 1000 bytes');
+  assert.strictEqual(r.overflow, true);
   assert.strictEqual(r.status, null);
   const r2 = await runTool(process.execPath, ['-e', 'process.stderr.write("y".repeat(200000));setTimeout(()=>{},10000)'],
     { maxBytes: 1000 });
   assert.ok(r2.error);
+});
+
+test('checkFile: an output overflow is reported as the output cap, not as "not started"', async () => {
+  const r = await checkFile(FILE, OPTS, fake({
+    probe: { error: new Error('ffprobe output exceeded 1000 bytes'), overflow: true, status: null, signal: null, stdout: '', stderr: '' },
+  }));
+  assert.strictEqual(r.verdict, 'error');
+  assert.strictEqual(r.detail, 'ffprobe could not read the file (output cap): ffprobe output exceeded 1000 bytes');
+});
+
+test('runTool: the Windows Ctrl+C exit status is an interrupt; live children are tracked', async () => {
+  const r = await runTool(process.execPath, ['-e', 'process.exit(3221225786)']);
+  if (process.platform === 'win32') {
+    assert.strictEqual(r.status, 3221225786);
+    assert.strictEqual(r.interrupted, true);
+  }
+  const ok = await runTool(process.execPath, ['-e', '0']);
+  assert.ok(!ok.interrupted);
+
+  const before = liveChildren.size;
+  const p = runTool(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { timeoutMs: 300 });
+  assert.strictEqual(liveChildren.size, before + 1);
+  await p;
+  assert.strictEqual(liveChildren.size, before);
+});
+
+const threeFiles = (t) => {
+  const root = tmpRoot(t);
+  for (let i = 1; i <= 3; i++) fs.writeFileSync(path.join(root, 'f' + i + '.mkv'), '');
+  return root;
+};
+
+test('main: a call that ends with the Ctrl+C exit status after the interrupt is not reported', async (t) => {
+  const root = threeFiles(t);
+  const inner = fake();
+  let handler = null;
+  let probes = 0;
+  const exits = [];
+  const run = async (cmd, args) => {
+    if (args.includes(PROBE_ARG) && ++probes === 2) {
+      handler();
+      return { status: 3221225786, signal: null, stdout: '', stderr: '' };
+    }
+    return inner(cmd, args);
+  };
+  const c = capture(run, { onInterrupt: (fn) => { handler = fn; return () => {}; }, exit: (code) => exits.push(code), killChildren: () => {} });
+  assert.strictEqual(await main(['-j', '1', root], c.deps), 130);
+  assert.deepStrictEqual(exits, [130]);
+  assert.ok(!c.out.some((l) => l.startsWith('[2/3]') || l.includes('ERROR')), c.out.join(String.fromCharCode(10)));
+  assert.strictEqual(probes, 2);
+  assert.strictEqual(c.out.filter((l) => l.startsWith('Checked')).length, 1);
+});
+
+test('main: a Ctrl+C exit status before the handler runs stops the scan and still prints the summary', async (t) => {
+  const root = threeFiles(t);
+  const inner = fake();
+  let probes = 0;
+  const exits = [];
+  const run = async (cmd, args) => {
+    if (args.includes(PROBE_ARG) && ++probes === 2) return { status: 3221225786, signal: null, stdout: '', stderr: '' };
+    return inner(cmd, args);
+  };
+  const c = capture(run, { onInterrupt: () => () => {}, exit: (code) => exits.push(code), killChildren: () => {} });
+  assert.strictEqual(await main(['-j', '1', root], c.deps), 130);
+  assert.deepStrictEqual(exits, [130]);
+  assert.strictEqual(probes, 2);
+  assert.ok(!c.out.some((l) => l.includes('ERROR')), c.out.join(String.fromCharCode(10)));
+  const i = c.out.indexOf('Interrupted.');
+  assert.deepStrictEqual(c.out.slice(i), [
+    'Interrupted.',
+    '',
+    'Checked 1 file: 1 clean, 0 deliberate VFR, 0 damaged, 0 errors, 0 skipped.',
+  ]);
+});
+
+test('main: the interrupt handler kills the live ffprobe children', async (t) => {
+  const root = threeFiles(t);
+  const inner = fake();
+  let handler = null;
+  let probes = 0;
+  const spy = { kills: 0, kill() { this.kills++; } };
+  liveChildren.add(spy);
+  t.after(() => liveChildren.delete(spy));
+  const run = async (cmd, args) => {
+    if (args.includes(PROBE_ARG) && ++probes === 2) handler();
+    return inner(cmd, args);
+  };
+  const c = capture(run, { onInterrupt: (fn) => { handler = fn; return () => {}; }, exit: () => {} });
+  await main(['-j', '1', root], c.deps);
+  assert.strictEqual(spy.kills, 1);
+});
+
+test('collectFiles: a file and a link to it are checked once, under the first spelling', (t) => {
+  const root = tmpRoot(t);
+  const dir = path.join(root, 'd');
+  fs.mkdirSync(dir);
+  const real = path.join(dir, 'real.mkv');
+  const link = path.join(dir, 'link.mkv');
+  fs.writeFileSync(real, '');
+  try {
+    fs.symlinkSync(real, link, 'file');
+  } catch (e) {
+    t.skip('cannot create file links here: ' + e.message);
+    return;
+  }
+  assert.deepStrictEqual(collectFiles([dir]).files, [link]);
+  assert.deepStrictEqual(collectFiles([real, link]).files, [real]);
+  assert.deepStrictEqual(collectFiles([link, dir]).files, [link]);
 });

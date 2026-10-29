@@ -35,11 +35,11 @@
 
   - `oneLine` (splits on \r\n, \r, \n; trims; drops empty lines; joins with ` | `); `capLabel` (`'256 MB'`, `'1000 bytes'`).
   - `parseArgs`: defaults `{ all: false, jobs: 2, timeout: 120, ffprobe: 'ffprobe', paths: [], help: false }`; every option; the errors (`--jobs`/`-j` need a whole number of at least 1, `--timeout needs a whole number of minutes (0 = none)` for `-1`, `x`, `1.5` and a missing value, `--ffprobe needs a path`, `unknown option --bogus`); `--timeout 0`; `--`; `-h`/`--help`.
-  - `checkFile`: cover art only → skipped; standard rate → clean in 1 call (`--all` → 2 calls); odd rate steady → clean with the exact listing call; a 4 s hole → `vfr` with the exact decode call; the hole with decode errors → `damaged` with the plugin's text and `firstErrors`; cover art at index 0 → listing uses stream 1; the runner receives `{ timeoutMs: minutes * 60000 }`; every ffprobe failure text (exit, not started, no JSON, signal, too few timestamps, decode); `(timed out after 7 min)`; multi-line stderr becomes one line.
-  - `collectFiles` (real temp folders): extension filter and sort order, explicit files of any extension, missing path → `not found`, duplicates; paths normalised with `path.resolve` (mixed slashes, relative, case on Windows) and a file given directly and inside a given folder is listed once under its first spelling; a junction to another folder is followed and a junction back to the parent does not loop (`t.skip` if links can't be created); a folder whose `readdirSync` throws (`t.mock.method`) is a one-line problem and the rest is still collected.
+  - `checkFile`: cover art only → skipped; standard rate → clean in 1 call (`--all` → 2 calls); odd rate steady → clean with the exact listing call; a 4 s hole → `vfr` with the exact decode call; the hole with decode errors → `damaged` with the plugin's text and `firstErrors`; cover art at index 0 → listing uses stream 1; the runner receives `{ timeoutMs: minutes * 60000 }`; every ffprobe failure text (exit, not started, no JSON, signal, too few timestamps, decode); `(timed out after 7 min)`; an overflowed call (`overflow: true`) is `(output cap): ffprobe output exceeded 1000 bytes`, not "not started"; multi-line stderr becomes one line.
+  - `collectFiles` (real temp folders): extension filter and sort order, explicit files of any extension, missing path → `not found`, duplicates; paths normalised with `path.resolve` (mixed slashes, relative, case on Windows) and a file given directly and inside a given folder is listed once under its first spelling; a file and a symlink to it are listed once under the first spelling (`t.skip` if file links can't be created); a junction to another folder is followed and a junction back to the parent does not loop (`t.skip` if links can't be created); a folder whose `readdirSync` throws (`t.mock.method`) is a one-line problem and the rest is still collected.
   - `summarise`: the exact lines for damaged + errors + not-found paths (singular/plural), exit codes 1/3/0.
-  - `main` (fake runner, captured `out`/`err`): usage and exit 2/0; unknown option; unusable ffprobe (not started, exit) → exit 2, nothing else printed, only the `-version` call; no video files → 2; damaged → `Found 2 video files.`, tab-separated progress lines, summary, Damaged section, exit 1; `Found 1 video file.`; missing path → exit 3 and ` 1 path not found.`; unreadable file → exit 3 with a one-line detail; damaged beats errors; a runner that throws → `ERROR` line; the same file given three ways → 1; concurrency never exceeds `-j` (2 and 1); Ctrl+C (`deps.onInterrupt`/`deps.exit` stubs) prints `Interrupted.` and one summary, exits 130.
-  - `runTool` (real Node child): status/stdout/stderr and a missing tool; a child killed by `timeoutMs: 200` has `timedOut` and a `signal`; a quick child is not timed out; output beyond `maxBytes: 1000` kills it with `error.message === 'ffprobe output exceeded 1000 bytes'` (stdout and stderr).
+  - `main` (fake runner, captured `out`/`err`): usage and exit 2/0; unknown option; unusable ffprobe (not started, exit) → exit 2, nothing else printed, only the `-version` call; no video files → 2; damaged → `Found 2 video files.`, tab-separated progress lines, summary, Damaged section, exit 1; `Found 1 video file.`; missing path → exit 3 and ` 1 path not found.`; unreadable file → exit 3 with a one-line detail; damaged beats errors; a runner that throws → `ERROR` line; the same file given three ways → 1; concurrency never exceeds `-j` (2 and 1); Ctrl+C (`deps.onInterrupt`/`deps.exit`/`deps.killChildren` stubs) prints `Interrupted.` and one summary, exits 130; a call that ends with status 3221225786 is not reported, whether it comes after the handler ran or before it (then the scan stops and the interrupt routine runs itself); the handler kills the children in `liveChildren` (a `kill` spy).
+  - `runTool` (real Node child): status/stdout/stderr and a missing tool; a child killed by `timeoutMs: 200` has `timedOut` and a `signal`; a quick child is not timed out; output beyond `maxBytes: 1000` kills it with `error.message === 'ffprobe output exceeded 1000 bytes'` and `overflow: true` (stdout and stderr); exit status 3221225786 sets `interrupted` (Windows); `liveChildren` holds the child while it runs.
 
 - [ ] **Step 2: Run them, see them fail** — `node --test tests/check_video.test.js` fails with `Cannot find module …tools/check-video.js`.
 
@@ -70,13 +70,27 @@ const LABEL = { clean: 'CLEAN', vfr: 'VFR', damaged: 'DAMAGED', error: 'ERROR', 
 const NOT_FOUND = 'not found';
 const MAX_BYTES = 256 * 1024 * 1024; // the plugin's maxBuffer
 const DEFAULT_TIMEOUT_MIN = 120;
+// Windows' exit status for a process ended by Ctrl+C (STATUS_CONTROL_C_EXIT).
+const CONTROL_C = 3221225786;
+
+// The ffprobe processes running now, so Ctrl+C can stop them.
+const liveChildren = new Set();
+const killAll = () => {
+  liveChildren.forEach((c) => {
+    try {
+      c.kill();
+    } catch (e) {
+      // already gone
+    }
+  });
+};
 
 // Error details are single lines: split on line breaks, trim, drop empty lines, join with " | ".
 const oneLine = (text) => String(text).split(/\r\n|\r|\n/).map((s) => s.trim()).filter(Boolean).join(' | ');
 
 const capLabel = (bytes) => (bytes >= 1024 * 1024 ? Math.round(bytes / (1024 * 1024)) + ' MB' : bytes + ' bytes');
 
-// Runs a tool to completion: { status, signal, stdout, stderr, error, timedOut }.
+// Runs a tool to completion: { status, signal, stdout, stderr, error, timedOut, overflow, interrupted }.
 // opts.timeoutMs (0 = none) kills it; opts.maxBytes caps each output stream.
 const runTool = (cmd, args, opts) => new Promise((resolve) => {
   const o = Object.assign({ timeoutMs: 0, maxBytes: MAX_BYTES }, opts);
@@ -91,12 +105,14 @@ const runTool = (cmd, args, opts) => new Promise((resolve) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
+    liveChildren.delete(child);
     resolve(r);
   };
   const child = spawn(cmd, args, { windowsHide: true });
+  liveChildren.add(child);
   const overflow = () => {
     child.kill();
-    finish({ error: new Error('ffprobe output exceeded ' + capLabel(o.maxBytes)), status: null, signal: null, stdout, stderr });
+    finish({ error: new Error('ffprobe output exceeded ' + capLabel(o.maxBytes)), overflow: true, status: null, signal: null, stdout, stderr });
   };
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -116,6 +132,7 @@ const runTool = (cmd, args, opts) => new Promise((resolve) => {
   child.on('close', (status, signal) => {
     const r = { status, signal, stdout, stderr };
     if (timedOut) Object.assign(r, { signal: signal || 'SIGTERM', timedOut: true });
+    else if (status === CONTROL_C) r.interrupted = true;
     finish(r);
   });
   if (o.timeoutMs > 0) {
@@ -130,7 +147,8 @@ const failed = (r) => !!r.error || r.status !== 0;
 // "(exit 1): <last lines of the output>"
 const why = (r, minutes) => {
   const how = r.timedOut ? 'timed out after ' + minutes + ' min'
-    : r.error ? 'not started' : r.signal ? 'signal ' + r.signal : 'exit ' + r.status;
+    : r.overflow ? 'output cap'
+        : r.error ? 'not started' : r.signal ? 'signal ' + r.signal : 'exit ' + r.status;
   return '(' + how + '): ' + rules.tail(r.error ? r.error.message : (r.stderr || r.stdout || 'no output'));
 };
 
@@ -219,7 +237,7 @@ const walk = (dir, files, problems, visited) => {
 };
 
 // Files given explicitly are checked whatever their extension; folders are walked for video files.
-// Paths are made absolute, and a file reached twice is listed once (first spelling kept).
+// Paths are made absolute, and a file reached twice (or through a link) is listed once (first spelling kept).
 const collectFiles = (paths) => {
   const files = [];
   const problems = [];
@@ -239,7 +257,13 @@ const collectFiles = (paths) => {
   const seen = new Set();
   return {
     files: files.filter((f) => {
-      const k = keyOf(path.resolve(f));
+      let real = path.resolve(f);
+      try {
+        real = fs.realpathSync(f);
+      } catch (e) {
+        // keep the resolved path
+      }
+      const k = keyOf(real);
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
@@ -321,6 +345,7 @@ const main = async (argv, deps) => {
       process.once('SIGINT', fn);
       return () => process.removeListener('SIGINT', fn);
     },
+    killChildren: killAll,
     exit: (code) => {
       process.exitCode = code;
       process.stdout.write('', () => process.exit(code));
@@ -352,28 +377,40 @@ const main = async (argv, deps) => {
   let next = 0;
   let done = 0;
   let interrupted = false;
-  const off = d.onInterrupt(() => {
+  let stopping = false; // a call ended with Ctrl+C's exit status
+  const interrupt = () => {
+    if (interrupted) return;
     interrupted = true;
+    d.killChildren();
     d.out('Interrupted.');
     summarise(results, done, d.out);
     d.exit(130);
-  });
+  };
+  const off = d.onInterrupt(interrupt);
   const worker = async () => {
-    while (!interrupted && next < files.length) {
+    while (!interrupted && !stopping && next < files.length) {
       const file = files[next++];
+      let hit = false;
+      const run = async (cmd, args, ropts) => {
+        const res = await d.run(cmd, args, ropts);
+        if (res && (res.interrupted || res.status === CONTROL_C)) hit = true;
+        return res;
+      };
       let r;
       try {
-        r = await checkFile(file, o, d.run);
+        r = await checkFile(file, o, run);
       } catch (e) {
         r = { file, verdict: 'error', detail: oneLine(e.message) };
       }
-      if (interrupted) return;
+      if (hit) stopping = true;
+      if (interrupted || hit) return;
       results.push(r);
       done++;
       d.out('[' + done + '/' + files.length + '] ' + LABEL[r.verdict].padEnd(7) + ' ' + r.file + '\t' + r.detail);
     }
   };
   await Promise.all(Array.from({ length: Math.min(o.jobs, files.length) }, worker));
+  if (stopping) interrupt();
   if (typeof off === 'function') off();
   if (interrupted) return 130;
   return summarise(results, files.length, d.out);
@@ -388,7 +425,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { EXTENSIONS, oneLine, capLabel, runTool, checkFile, collectFiles, parseArgs, summarise, main };
+module.exports = { EXTENSIONS, liveChildren, killAll, oneLine, capLabel, runTool, checkFile, collectFiles, parseArgs, summarise, main };
 ```
 
 - [ ] **Step 4: Run the tests** — `node --test tests/*.test.js`: fail 0.
