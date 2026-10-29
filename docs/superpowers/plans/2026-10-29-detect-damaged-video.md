@@ -674,6 +674,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const Module = require('module');
 const path = require('path');
+const fs = require('fs');
 
 // The plugins do require('../methods/lib') (Tdarr's runtime). Stub it for local runs.
 // Tests that drive the plugin end to end also swap in fake 'fs' / 'child_process' via `stubs`.
@@ -701,7 +702,8 @@ const LIST_ARGS = ['-v', 'error', '-select_streams', '0', '-show_entries', 'pack
 
 // 23185/967 is 0.0002 fps from 24000/1001: a near-miss.
 const run = (cfg) => {
-  const c = Object.assign({ rate: '23185/967', listing: { status: 0, stdout: csv(grid(0, 240)), stderr: '' } }, cfg);
+  const c = Object.assign({ rate: '23185/967', listing: { status: 0, stdout: csv(grid(0, 240)), stderr: '' },
+    other: { cacheFilePath: '/w/a.mkv', mkvpropeditPath: 'mkvpropedit' } }, cfg);
   const calls = [];
   stubs = {
     fs: { existsSync: () => false, unlinkSync: () => {} },
@@ -717,8 +719,8 @@ const run = (cfg) => {
   };
   try {
     const file = { _id: '/m/a.mkv', file: '/m/a.mkv', container: 'mkv',
-      ffProbeData: { streams: [{ index: 0, codec_type: 'video', r_frame_rate: c.rate }] } };
-    const res = repair.plugin(file, {}, { max_delta_fps: 0.05 }, { cacheFilePath: '/w/a.mkv', mkvpropeditPath: 'mkvpropedit' });
+      ffProbeData: { streams: c.streams || [{ index: 0, codec_type: 'video', r_frame_rate: c.rate }] } };
+    const res = repair.plugin(file, {}, { max_delta_fps: 0.05 }, c.other);
     return { res, calls };
   } finally {
     stubs = null;
@@ -740,6 +742,12 @@ test('repair: near-miss with gaps is skipped before mkvmerge', () => {
   assert.strictEqual(res.file._id, '/m/a.mkv');
 });
 
+test('repair: outside a flow, a near-miss is skipped before anything is read', () => {
+  const { res, calls } = run({ other: undefined });
+  assert.strictEqual(res.infoLog, 'No cacheFilePath provided (not running in a flow?), skipping.\r\n');
+  assert.deepStrictEqual(calls, []);
+});
+
 test('repair: a far-off rate is still skipped without probing', () => {
   const { res, calls } = run({ rate: '7016/301' });
   assert.match(res.infoLog, /Not a near-miss; repairing would change playback speed\. Skipping\./);
@@ -751,6 +759,13 @@ test('repair: a failed timestamp listing leaves the original untouched', () => {
   assert.strictEqual(res.infoLog, 'Error: ffprobe could not list the video timestamps (exit 1): boom. Original left untouched.\r\n');
   assert.deepStrictEqual(calls.map((x) => x[0]), ['ffprobe']);
   assert.strictEqual(res.error, undefined);
+});
+
+test('repair: an ffprobe failure message is trimmed, and says so when there is no output', () => {
+  const msg = (why) => 'Error: ffprobe could not list the video timestamps (' + why + '. Original left untouched.\r\n';
+  assert.strictEqual(run({ listing: { status: 1, stdout: '', stderr: 'boom\n' } }).res.infoLog, msg('exit 1): boom'));
+  assert.strictEqual(run({ listing: { status: 1, stdout: '', stderr: '' } }).res.infoLog, msg('exit 1): no output'));
+  assert.strictEqual(run({ listing: { status: null, signal: 'SIGKILL', stdout: '', stderr: '' } }).res.infoLog, msg('signal SIGKILL): no output'));
 });
 
 test('repair: ffprobe that cannot be started leaves the original untouched', () => {
@@ -766,31 +781,66 @@ test('repair: too few usable timestamps means the timing cannot be checked, so n
 });
 
 test('repair: without a numeric stream index, selects the video by its position among video streams', () => {
-  stubs = null;
-  const calls = [];
-  stubs = {
-    fs: { existsSync: () => false, unlinkSync: () => {} },
-    child_process: {
-      spawnSync: (cmd, args) => {
-        calls.push([cmd].concat(args));
-        if (args.includes('packet=pts_time')) return { status: 0, stdout: csv(grid(0, 50).concat(grid(51, 100))), stderr: '' };
-        throw new Error('unexpected call: ' + cmd + ' ' + args.join(' '));
-      },
-    },
-  };
-  try {
-    const file = { _id: '/m/a.mkv', file: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: [
+  const { calls } = run({
+    listing: { status: 0, stdout: csv(grid(0, 50).concat(grid(51, 100))), stderr: '' },
+    streams: [
       { codec_type: 'video', r_frame_rate: '90000/1', disposition: { attached_pic: 1 } },
       { codec_type: 'video', r_frame_rate: '23185/967' },
-    ] } };
-    repair.plugin(file, {}, { max_delta_fps: 0.05 }, { cacheFilePath: '/w/a.mkv', mkvpropeditPath: 'mkvpropedit' });
-  } finally {
-    stubs = null;
-  }
+    ],
+  });
   assert.deepStrictEqual(calls[0].slice(3, 5), ['-select_streams', 'v:1']);
 });
 
+test('repair: the verification gate probes the same video stream the gap check used', () => {
+  const calls = [];
+  stubs = {
+    fs: { existsSync: (p) => p === '/w/a.mkv', unlinkSync: () => {} },
+    child_process: {
+      spawnSync: (cmd, args) => {
+        calls.push([cmd].concat(args));
+        if (cmd === 'ffprobe' && args.includes('packet=pts_time')) return { status: 0, stdout: csv(grid(0, 240)), stderr: '' };
+        if (cmd === 'mkvmerge' && args[0] === '-J') return { status: 0, stdout: JSON.stringify({ tracks: [{ id: 1, type: 'video' }] }), stderr: '' };
+        if (cmd === 'mkvmerge') return { status: 0, stdout: '', stderr: '' };
+        if (cmd === 'ffprobe') {
+          return { status: 0, stderr: '', stdout: JSON.stringify({ streams: [{ codec_name: 'h264', pix_fmt: 'yuv420p',
+            r_frame_rate: args.includes('/m/a.mkv') ? '23185/967' : '24000/1001', nb_read_packets: '240' }], format: { duration: '10' } }) };
+        }
+        throw new Error('unexpected call: ' + cmd);
+      },
+    },
+  };
+  let res;
+  try {
+    const file = { _id: '/m/a.mkv', file: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: [
+      { index: 0, codec_type: 'video', r_frame_rate: '90000/1', disposition: { attached_pic: 1 } },
+      { index: 1, codec_type: 'video', r_frame_rate: '23185/967' },
+    ] } };
+    res = repair.plugin(file, {}, { max_delta_fps: 0.05 }, { cacheFilePath: '/w/a.mkv', mkvpropeditPath: 'mkvpropedit' });
+  } finally {
+    stubs = null;
+  }
+  assert.match(res.infoLog, /Verified:/);
+  const probes = calls.filter((x) => x[0] === 'ffprobe');
+  assert.strictEqual(probes.length, 3);
+  probes.forEach((x) => assert.strictEqual(x[x.indexOf('-select_streams') + 1], '1'));
+});
+
 // Each plugin file must stand alone, so the gap code exists twice. Both copies must agree.
+test('shared gap code: the source text of both copies is identical', () => {
+  const extract = (file) => {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8').replace(/\r\n/g, '\n');
+    const from = text.search(/^\/\/ --- Gaps in the frame timing/m);
+    const endMark = '// --- end of the shared gap code ---';
+    const to = text.indexOf(endMark);
+    assert.ok(from >= 0 && to > from, file + ': markers not found');
+    return text.slice(from, to + endMark.length).split('\n').slice(1).join('\n');
+  };
+  const a = extract('Tdarr_Plugin_the1nk_repair_framerate.js');
+  const b = extract('Tdarr_Plugin_the1nk_detect_damaged_video.js');
+  assert.ok(a.length > 0);
+  assert.strictEqual(a, b);
+});
+
 test('shared gap code: both plugins give the same results', () => {
   const r = repair._test;
   const d = detect._test;
@@ -799,6 +849,7 @@ test('shared gap code: both plugins give the same results', () => {
     '1.5\n',
     csv(grid(0, 240)),
     csv(grid(0, 50).concat(grid(51, 100))),
+    csv(grid(0, 50).concat(grid(51, 100), grid(101, 150))),
     csv(grid(0, 120).concat(grid(216, 240))),
     '0.083000\r\n0.000000\r\nN/A\r\n0.042000,\r\n',
     '0\n0.04\n0.08\n0.13\n0.18\n',
@@ -816,7 +867,7 @@ test('shared gap code: both plugins give the same results', () => {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `node --test tests/repair_framerate.test.js`
-Expected: FAIL. The steady/gappy/listing/not-started/no-timestamps/stream-position tests fail because no `ffprobe` call happens before `mkvmerge`; the parity test fails with `Cannot read properties of undefined (reading 'parseTimes')` (no `_test` export yet). The far-off test passes already.
+Expected: FAIL. The steady/gappy/listing/not-started/no-timestamps/stream-position/no-flow/failure-message/verification-stream tests fail because no `ffprobe` call happens before `mkvmerge`; the parity test fails with `Cannot read properties of undefined (reading 'parseTimes')` (no `_test` export yet). The far-off test passes already.
 
 - [ ] **Step 3: Implement the guard**
 
@@ -835,13 +886,18 @@ In `Tdarr_Plugin_the1nk_repair_framerate.js`:
 // --- Gaps in the frame timing. Keep identical to the copy in Tdarr_Plugin_the1nk_detect_damaged_video.js. ---
 ```
 
-(c) Replace lines 101–118 (from `if (delta >= inputs.max_delta_fps) {` through the line `var ffprobe = FFPROBE_CANDIDATES.find(…);`) with:
+(c) Replace lines 101–118 (from `if (delta >= inputs.max_delta_fps) {` through the line `var ffprobe = FFPROBE_CANDIDATES.find(…);`) with the block below. The `cacheFilePath` check now comes right after the near-miss test, so a run outside a flow never reads the file; the mkvmerge path lines stay after the guard:
 
 ```js
     if (delta >= inputs.max_delta_fps) {
       response.infoLog += 'Frame rate ' + rate + ' (' + fps.toFixed(3) + ' fps) is ' + delta.toFixed(3)
         + ' fps from nearest standard ' + target + ' (limit ' + inputs.max_delta_fps + '). '
         + 'Not a near-miss; repairing would change playback speed. Skipping.\r\n';
+      return response;
+    }
+
+    if (!otherArguments || !otherArguments.cacheFilePath) {
+      response.infoLog += 'No cacheFilePath provided (not running in a flow?), skipping.\r\n';
       return response;
     }
 
@@ -854,8 +910,8 @@ In `Tdarr_Plugin_the1nk_repair_framerate.js`:
       stream = String(video.index);
     } else {
       // ffprobe's v:N counts cover art too.
-      var before = streams.slice(0, streams.indexOf(video));
-      stream = 'v:' + before.filter(function (s) { return s.codec_type === 'video'; }).length;
+      var earlier = streams.slice(0, streams.indexOf(video));
+      stream = 'v:' + earlier.filter(function (s) { return s.codec_type === 'video'; }).length;
     }
     var list = spawnSync(ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
       '-of', 'csv=p=0', '--', file._id], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
@@ -863,7 +919,7 @@ In `Tdarr_Plugin_the1nk_repair_framerate.js`:
       throw new Error('ffprobe could not list the video timestamps ('
         + (list.error && list.status === null && !list.signal ? 'not started'
           : list.signal ? 'signal ' + list.signal : 'exit ' + list.status) + '): '
-        + String(list.error ? list.error.message : list.stderr).slice(-2000));
+        + String(list.error ? list.error.message : (list.stderr || list.stdout || 'no output')).trim().slice(-2000));
     }
     var times = parseTimes(list.stdout);
     if (times.length < 2) {
@@ -878,18 +934,21 @@ In `Tdarr_Plugin_the1nk_repair_framerate.js`:
       return response;
     }
 
-    if (!otherArguments || !otherArguments.cacheFilePath) {
-      response.infoLog += 'No cacheFilePath provided (not running in a flow?), skipping.\r\n';
-      return response;
-    }
-
     // mkvmerge ships alongside mkvpropedit (mkvtoolnix).
     var propedit = (otherArguments.mkvpropeditPath || 'mkvpropedit');
     var mkvmerge = path.join(path.dirname(propedit), path.basename(propedit).replace('mkvpropedit', 'mkvmerge'));
     if (path.dirname(propedit) === '.') mkvmerge = path.basename(mkvmerge);
 ```
 
-(The only removed line is the old `var ffprobe = …` that sat after the mkvmerge lines; it now comes before the guard.)
+(The old `var ffprobe = …` that sat after the mkvmerge lines is removed; it now comes before the guard. The old `cacheFilePath` check moved up, ahead of it.)
+
+(c2) In the verification gate, the `info` helper must probe the same video the guard checked. Replace `var info = function (p) {` and its first line `var j = probe(['-select_streams', 'v:0', '-count_packets',` with:
+
+```js
+    // Same selector for source and output: mkvmerge keeps the track order, so it names the same video in both.
+    var info = function (p) {
+      var j = probe(['-select_streams', stream, '-count_packets',
+```
 
 (d) At the end of the file, after `module.exports.plugin = plugin;`, add:
 

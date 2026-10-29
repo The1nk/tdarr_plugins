@@ -172,6 +172,11 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       return response;
     }
 
+    if (!otherArguments || !otherArguments.cacheFilePath) {
+      response.infoLog += 'No cacheFilePath provided (not running in a flow?), skipping.\r\n';
+      return response;
+    }
+
     var ffprobe = FFPROBE_CANDIDATES.find(function (c) { return !path.isAbsolute(c) || fs.existsSync(c); });
 
     // Frames missing from the stream also give a near-miss rate (24 fps missing 1 frame in 600 is 23.96).
@@ -181,8 +186,8 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       stream = String(video.index);
     } else {
       // ffprobe's v:N counts cover art too.
-      var before = streams.slice(0, streams.indexOf(video));
-      stream = 'v:' + before.filter(function (s) { return s.codec_type === 'video'; }).length;
+      var earlier = streams.slice(0, streams.indexOf(video));
+      stream = 'v:' + earlier.filter(function (s) { return s.codec_type === 'video'; }).length;
     }
     var list = spawnSync(ffprobe, ['-v', 'error', '-select_streams', stream, '-show_entries', 'packet=pts_time',
       '-of', 'csv=p=0', '--', file._id], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
@@ -190,7 +195,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       throw new Error('ffprobe could not list the video timestamps ('
         + (list.error && list.status === null && !list.signal ? 'not started'
           : list.signal ? 'signal ' + list.signal : 'exit ' + list.status) + '): '
-        + String(list.error ? list.error.message : list.stderr).slice(-2000));
+        + String(list.error ? list.error.message : (list.stderr || list.stdout || 'no output')).trim().slice(-2000));
     }
     var times = parseTimes(list.stdout);
     if (times.length < 2) {
@@ -202,11 +207,6 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     if (timing.gaps.length) {
       response.infoLog += 'Near-miss rate ' + rate + ', but found ' + describeGaps(timing)
         + '. Forcing a constant rate would desync audio. Skipping.\r\n';
-      return response;
-    }
-
-    if (!otherArguments || !otherArguments.cacheFilePath) {
-      response.infoLog += 'No cacheFilePath provided (not running in a flow?), skipping.\r\n';
       return response;
     }
 
@@ -258,8 +258,9 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       if (r.error || r.status !== 0) throw new Error('ffprobe failed on ' + p + ': ' + (r.error ? r.error.message : r.stderr));
       return JSON.parse(r.stdout);
     };
+    // Same selector for source and output: mkvmerge keeps the track order, so it names the same video in both.
     var info = function (p) {
-      var j = probe(['-select_streams', 'v:0', '-count_packets',
+      var j = probe(['-select_streams', stream, '-count_packets',
         '-show_entries', 'stream=codec_name,pix_fmt,r_frame_rate,nb_read_packets:format=duration', '-of', 'json'], p);
       var s = (j.streams || [])[0] || {};
       return {
