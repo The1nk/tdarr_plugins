@@ -8,8 +8,8 @@ const details = () => {
     Name: "Convert unsupported subtitles",
     Type: "Video",
     Operation: "Transcode",
-    Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT, and muxed back in their original position with their language, name and flags. Cues that are empty or only whitespace are left out, as are cues whose only content is markup SRT can't carry (such as <c> tags); cues holding only SRT formatting or a non-breaking space stay as invisible entries. A WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track and any Matroska track that is not video, audio or subtitles (such as DVD buttons), which mkvmerge cannot keep. The result is verified before it is used: track layout, codecs and the converted tracks' language, name and flags; the cue count of each converted track; an exact packet count for every kept track except PCM, which is checked by exact payload bytes, and kept SRT tracks, whose expected count leaves out the blank blocks mkvmerge drops; and the duration. If anything fails, the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
-    Version: "1.06",
+    Description: `Fixes MKV subtitle tracks that FFmpeg can't read (ffprobe reports no codec), which make every later "-map 0 -c copy" step fail with "Subtitle codec 0 is not supported". WebVTT tracks stored with the newer S_TEXT/WEBVTT codec ID are extracted with mkvextract, converted to SRT (lines of only spaces or tabs outside a cue, which stop FFmpeg's WebVTT reader, are emptied first), and muxed back in their original position with their language, name and flags. Cues that are empty or only whitespace are left out, as are cues whose only content is markup SRT can't carry (such as <c> tags); cues holding only SRT formatting or a non-breaking space stay as invisible entries. A WebVTT track with no cue text at all is dropped, as is any other unreadable subtitle track and any Matroska track that is not video, audio or subtitles (such as DVD buttons), which mkvmerge cannot keep. The result is verified before it is used: track layout, codecs and the converted tracks' language, name and flags; the cue count of each converted track; an exact packet count for every kept track except PCM, which is checked by exact payload bytes, and kept SRT tracks, whose expected count leaves out the blank blocks mkvmerge drops; and the duration. If anything fails, the job fails with the reason and the library file is left untouched. Flow-only: runs mkvtoolnix itself and hands the new file to the next flow plugin.`,
+    Version: "1.07",
     Tags: "pre-processing,mkvmerge,subtitle",
     Inputs: [],
   };
@@ -321,6 +321,34 @@ var parseCues = function (text) {
     }
   });
   return cues.map(function (c) { return c.lines.join('\n'); });
+};
+
+// Measured in the Tdarr node (FFmpeg 7.1.4) on a Netflix WebVTT track (DAN DA DAN S01E07): a line
+// of only spaces between the NOTE blocks and the first cue makes FFmpeg's WebVTT demuxer read 0
+// cues, write a 0-byte SRT and exit 0. Emptying that line brings every cue back. So lines of only
+// spaces/tabs outside a cue (the same cue boundaries as parseCues) are emptied before converting.
+// Lines inside a cue are cue text and stay as they are. Returns {text, blanked}.
+var blankOutsideCues = function (text) {
+  var inCue = false;
+  var blanked = 0;
+  var out = String(text || '').split('\n').map(function (raw) {
+    var cr = raw.charAt(raw.length - 1) === '\r';
+    var line = cr ? raw.slice(0, -1) : raw;
+    if (inCue) {
+      if (line === '') inCue = false;
+      return raw;
+    }
+    if (TIMING.test(line)) {
+      inCue = true;
+      return raw;
+    }
+    if (line !== '' && /^[ \t]+$/.test(line)) {
+      blanked += 1;
+      return cr ? '\r' : '';
+    }
+    return raw;
+  }).join('\n');
+  return { text: blanked ? out : String(text || ''), blanked: blanked };
 };
 
 // Visible text after the markup FFmpeg removes: every WebVTT tag, the SRT tags it writes,
@@ -685,6 +713,12 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         response.infoLog += 'WebVTT track ' + t.id + ' has no cues with text (' + plural(vttStats.total, 'cue', 'cues') + '), dropping it.\r\n';
         return;
       }
+      var cleaned = blankOutsideCues(vttText);
+      if (cleaned.blanked) {
+        fs.writeFileSync(vtt, cleaned.text, 'utf8');
+        response.infoLog += 'WebVTT track ' + t.id + ': emptied ' + plural(cleaned.blanked, 'whitespace-only line', 'whitespace-only lines')
+          + ' outside cues (FFmpeg stops reading cues at such a line).\r\n';
+      }
       var srt = path.join(workDir, 'track' + t.id + '.srt');
       temps.push(srt);
       var conv = run(ffmpeg, ['-hide_banner', '-v', 'error', '-y', '-i', vtt, '-c:s', 'srt', srt]);
@@ -803,6 +837,7 @@ module.exports._test = {
   buildMerge: buildMerge,
   toolFailed: toolFailed,
   cueStats: cueStats,
+  blankOutsideCues: blankOutsideCues,
   filtersBlankBlocks: filtersBlankBlocks,
   parseExtractedSrt: parseExtractedSrt,
   keptTextStats: keptTextStats,

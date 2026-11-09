@@ -19,7 +19,7 @@ const pluginModule = require(path.join(__dirname, '..', 'plugins', 'Tdarr_Plugin
 const {
   findUnreadableSubs, planTracks, buildMerge, toolFailed, cueStats, verifyOutput, pickFfprobe,
   vttProblem, packetCount, sumPacketCsv, comparesBytes, readTrackEntries, mapTracks, filtersBlankBlocks,
-  parseExtractedSrt, keptTextStats,
+  parseExtractedSrt, keptTextStats, blankOutsideCues,
 } = pluginModule._test;
 
 // Trimmed from the real "Good Boy (2025)" file.
@@ -395,6 +395,26 @@ test('vttProblem: extracted file must exist and start with the WEBVTT signature'
   assert.strictEqual(vttProblem(vtt4), null);
 });
 
+// Netflix WebVTT (DAN DA DAN S01E07, track 10): a line of spaces after the NOTE blocks. tdarr-ffmpeg 7.1.4
+// reads that block as a cue id with no timing line, stops there and writes a 0-byte SRT with exit 0.
+const netflixVtt = '\uFEFFWEBVTT\n\nNOTE Netflix\nNOTE Profile: webvtt-lssdh-ios8\n\nNOTE SegmentIndex\nNOTE /SegmentIndex\n\n'
+  + ' '.repeat(114) + '\n\n1\n00:00:34.951 --> 00:00:39.247 position:50.00%\n<c.bg_transparent>Ang kakapal</c.bg_transparent>\n\n'
+  + '2\n00:00:39.330 --> 00:00:41.583\n<c.bg_transparent>Aira!</c.bg_transparent>\n';
+
+test('blankOutsideCues: empties whitespace-only lines outside cues, keeps cue text as it is', () => {
+  const r = blankOutsideCues(netflixVtt);
+  assert.strictEqual(r.blanked, 1);
+  assert.strictEqual(r.text, netflixVtt.replace(' '.repeat(114), ''));
+  assert.deepStrictEqual(cueStats(r.text, 'vtt'), cueStats(netflixVtt, 'vtt'));
+  // Tabs, CRLF and lines between cues are emptied; a whitespace line inside a cue is cue text and stays.
+  const crlf = 'WEBVTT\r\n \t\r\n\r\n00:00:01.000 --> 00:00:02.000\r\nA\r\n   \r\nB\r\n\r\n  \r\n\r\n00:00:03.000 --> 00:00:04.000\r\nC\r\n';
+  const c = blankOutsideCues(crlf);
+  assert.strictEqual(c.blanked, 2);
+  assert.strictEqual(c.text, 'WEBVTT\r\n\r\n\r\n00:00:01.000 --> 00:00:02.000\r\nA\r\n   \r\nB\r\n\r\n\r\n\r\n00:00:03.000 --> 00:00:04.000\r\nC\r\n');
+  // Nothing to do: the same text back.
+  assert.deepStrictEqual(blankOutsideCues(vtt4), { text: vtt4, blanked: 0 });
+});
+
 // --- kept text subtitle tracks that mkvmerge filters ---
 
 test('filtersBlankBlocks: only S_TEXT/UTF8 and S_TEXT/ASCII', () => {
@@ -755,6 +775,7 @@ const run = (cfg) => {
   const files = Object.assign({}, { [W('track2.vtt')]: vtt4, [W('track2.srt')]: srt4 }, c.files);
   const calls = [];
   const unlinked = [];
+  const written = [];
   stubs = {
     fs: {
       existsSync: (p) => !(p in files) || files[p] !== null,
@@ -762,6 +783,7 @@ const run = (cfg) => {
       readSync: (fd, buf, off, len, pos) => header.copy(buf, off, pos, Math.min(pos + len, header.length)),
       closeSync: () => {},
       unlinkSync: (p) => { unlinked.push(p); },
+      writeFileSync: (p, text) => { written.push([p, text]); files[p] = text; },
       readFileSync: (p) => {
         if (!(p in files) || files[p] === null) throw new Error('unexpected read ' + p);
         return files[p];
@@ -793,7 +815,7 @@ const run = (cfg) => {
       { _id: '/m/a.mkv', container: 'mkv', ffProbeData: { streams: c.srcStreams, format: c.inFormat } },
       { cacheFilePath: '/w/out.mkv', ffmpegPath: 'tdarr-ffmpeg', mkvpropeditPath: 'mkvpropedit' },
     );
-    return { res, calls, unlinked };
+    return { res, calls, unlinked, written };
   } finally {
     stubs = null;
   }
@@ -813,6 +835,19 @@ test('plugin: verifies kept tracks by packet counts, hands on the output and rem
   assert.match(res.infoLog, /kept streams match the source exactly \(packets, or bytes for PCM\): 0 \(video\) 2500, 1 \(audio\) 4300\./);
   assert.deepStrictEqual(listingCalls(calls), []);
   assert.deepStrictEqual(unlinked.slice().sort(), [W('track2.srt'), W('track2.vtt')].sort());
+});
+
+test('plugin: empties whitespace-only lines outside cues before FFmpeg converts the track', () => {
+  const srt = '1\n00:00:34,951 --> 00:00:39,247\nAng kakapal\n\n2\n00:00:39,330 --> 00:00:41,583\nAira!\n\n';
+  const { res, calls, written } = run({ files: { [W('track2.vtt')]: netflixVtt, [W('track2.srt')]: srt } });
+  assert.strictEqual(res.error, undefined, res.infoLog);
+  assert.deepStrictEqual(written, [[W('track2.vtt'), netflixVtt.replace(' '.repeat(114), '')]]);
+  const conv = cmds(calls, 'tdarr-ffmpeg');
+  assert.strictEqual(conv.length, 1);
+  assert.strictEqual(conv[0][conv[0].indexOf('-i') + 1], W('track2.vtt'));
+  assert.match(res.infoLog, /WebVTT track 2: emptied 1 whitespace-only line outside cues/);
+  // A clean track is not rewritten.
+  assert.deepStrictEqual(run({}).written, []);
 });
 
 test('plugin: converted-cue log separates left-out cues from invisible entries that are kept', () => {
