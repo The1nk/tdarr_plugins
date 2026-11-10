@@ -37,6 +37,13 @@ mkdir -p "$T/C" && touch "$T/C/Movie (Tdarr).mkv" "$T/C/Movie.en.forced.srt"
 mkdir -p "$T/D" && touch "$T/D/Ep3 (Tdarr).mkv" "$T/D/Ep3 ().en.srt" "$T/D/Ep3 (Tdarr).en.srt"
 # E: plain exact match: nothing to do.
 mkdir -p "$T/E" && touch "$T/E/Show.mkv" "$T/E/Show.en.srt"
+# F: .ogm and .divx videos count (Great Teacher Onizuka, Doctor Who: reported as NO VIDEO before).
+mkdir -p "$T/F" && touch "$T/F/Gto ().ogm" "$T/F/Gto ().en.srt" "$T/F/Dw (Tdarr).divx" "$T/F/Dw ().en.srt"
+# G: a numbered subtitle (".1.en.srt", ".en.2.srt") belongs to its video and follows its suffix
+#    (Justified, Manifest: NO VIDEO before). A number with no language part next to it is title.
+mkdir -p "$T/G" && touch "$T/G/Ep4 ().mp4" "$T/G/Ep4 ().1.en.srt" \
+    "$T/G/Ep5 (Tdarr).mkv" "$T/G/Ep5 ().1.en.srt" "$T/G/Ep5 ().en.2.srt" \
+    "$T/G/Movie 2.5 (Tdarr).mkv" "$T/G/Movie 2.5.srt"
 
 out="$(bash "$S" "$T" 2>&1)"
 printf '%s\n' "$out" | sed 's/^/  | /'
@@ -46,6 +53,9 @@ check B "Ep2 (Tdarr).mkv" "Ep2 (Tdarr).en.srt" "Ep2 (Tdarr).nfo"
 check C "Movie (Tdarr).mkv" "Movie (Tdarr).en.forced.srt"
 check D "Ep3 (Tdarr).mkv" "Ep3 ().en.srt" "Ep3 (Tdarr).en.srt"
 check E "Show.mkv" "Show.en.srt"
+check F "Gto ().ogm" "Gto ().en.srt" "Dw (Tdarr).divx" "Dw (Tdarr).en.srt"
+check G "Ep4 ().mp4" "Ep4 ().1.en.srt" "Ep5 (Tdarr).mkv" "Ep5 (Tdarr).1.en.srt" "Ep5 (Tdarr).en.2.srt" \
+    "Movie 2.5 (Tdarr).mkv" "Movie 2.5 (Tdarr).srt"
 
 conflicts="$(printf '%s\n' "$out" | grep -c 'CONFLICT')"
 if [[ "$conflicts" -eq 1 ]] && printf '%s\n' "$out" | grep -q 'CONFLICT.*Ep3 (Tdarr).en.srt'; then
@@ -54,7 +64,7 @@ else
     echo "FAIL expected one CONFLICT (D), got $conflicts"
     fail=1
 fi
-if printf '%s\n' "$out" | grep -q 'Renamed: 3  |  Skipped: 1  |  No video: 0  |  Ambiguous: 0'; then
+if printf '%s\n' "$out" | grep -q 'Renamed: 7  |  Skipped: 1  |  No video: 0  |  Ambiguous: 0'; then
     echo "PASS summary"
 else
     echo "FAIL summary"

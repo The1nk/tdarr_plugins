@@ -16,7 +16,8 @@
 
 SUBTITLE_EXTS=(srt ass ssa vtt sub idx sup)
 SUBTITLE_TAGS=(forced sdh hi cc default full foreign)
-VIDEO_EXTS=(mkv mp4 avi mov wmv m4v ts m2ts mpg mpeg flv webm)
+# ogm and divx are in the library (Great Teacher Onizuka, Doctor Who); the rest are common too.
+VIDEO_EXTS=(mkv mp4 avi mov wmv m4v ts m2ts mts mpg mpeg flv webm ogm ogv divx xvid vob rm rmvb 3gp asf f4v mk3d)
 # Sidecars named exactly like the video (no language/tag parts).
 SIDECAR_EXTS=(nfo jpg jpeg png tbn)
 # Folder-level metadata/artwork names (lowercase stem) that never belong to one video.
@@ -58,6 +59,11 @@ in_array() {
     return 1
 }
 
+# Returns 0 for a subtitle language code (2-3 lowercase letters) or tag (forced, sdh, ...).
+is_lang_or_tag() {
+    in_array "$1" "${SUBTITLE_TAGS[@]}" || [[ "$1" =~ ^[a-z]{2,3}$ ]]
+}
+
 # Strips the multi-part subtitle extension to get the bare video-title portion,
 # but does NOT remove trailing empty parentheses.
 # e.g. "Movie ().en.forced.srt" -> "Movie ()"
@@ -79,11 +85,24 @@ get_subtitle_stem() {
         name="${name%.*}"
     fi
 
-    # Repeatedly strip trailing language codes and subtitle tags
+    # Repeatedly strip trailing language codes and subtitle tags. A number part
+    # (".1.en.srt", ".en.2.srt": a second subtitle in the same language) is
+    # stripped too, but only next to a language/tag part, so a title ending in a
+    # number ("Movie 2.5.srt") is kept.
+    local stripped=false part left
     while [[ "$name" == *.* ]]; do
         ext="${name##*.}"
-        if in_array "$ext" "${SUBTITLE_TAGS[@]}" || [[ "$ext" =~ ^[a-z]{2,3}$ ]]; then
+        if is_lang_or_tag "$ext"; then
             name="${name%.*}"
+            stripped=true
+        elif [[ "$ext" =~ ^[0-9]{1,2}$ ]]; then
+            left="${name%.*}"
+            part="${left##*.}"
+            if $stripped || { [[ "$left" == *.* ]] && is_lang_or_tag "$part"; }; then
+                name="$left"
+            else
+                break
+            fi
         else
             break
         fi

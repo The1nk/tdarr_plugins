@@ -354,7 +354,7 @@ If the output is cut short (for example piped into `Select-Object -First N` or `
 
 ### `scripts/match-subtitles.sh`
 
-Renames subtitle files (`srt ass ssa vtt sub idx sup`) and per-episode sidecars (`.nfo`, `.jpg`, `.png`, `.tbn`) to match their video after the video gained a suffix such as ` (Tdarr)`. For example, `Ep ().en.srt` becomes `Ep (Tdarr).en.srt` next to `Ep (Tdarr).mkv`. Language and tag parts (`.en.forced`) are kept, folder-level artwork and metadata (`poster.jpg`, `season.nfo`, ...) are ignored, and an existing file is never overwritten (reported as `CONFLICT`). A file that already matches its video, with or without empty parentheses, is left alone. The flows run it through Run Bash Script in Post with the file's folder as its argument; it also runs by hand:
+Renames subtitle files (`srt ass ssa vtt sub idx sup`) and per-episode sidecars (`.nfo`, `.jpg`, `.png`, `.tbn`) to match their video after the video gained a suffix such as ` (Tdarr)`. For example, `Ep ().en.srt` becomes `Ep (Tdarr).en.srt` next to `Ep (Tdarr).mkv`. Language and tag parts (`.en.forced`), and a number next to them for a second subtitle in the same language (`.1.en`, `.en.2`), are kept, folder-level artwork and metadata (`poster.jpg`, `season.nfo`, ...) are ignored, and an existing file is never overwritten (reported as `CONFLICT`). A file that already matches its video, with or without empty parentheses, is left alone. Videos are recognised by extension, including `.ogm` and `.divx`, which some library folders use. The flows run it through Run Bash Script in Post with the file's folder as its argument; it also runs by hand:
 
 ```bash
 match-subtitles.sh [-n|--dry-run] [-p|--prompt] [PATH]
@@ -404,7 +404,7 @@ MSYS_NO_PATHCONV=1 docker exec tdarr-node node /tmp/itest/plugins/detect_damaged
 MSYS_NO_PATHCONV=1 docker exec tdarr-node rm -rf /tmp/itest
 ```
 
-Integration test for [`scripts/match-subtitles.sh`](#scriptsmatch-subtitlessh), run with the node's bash. It builds five scenario folders in a fresh temp directory (already matching with empty parentheses, a suffixed video with `()` and plain-named subtitles, a real conflict, an exact match), runs the script and checks every resulting file name, that only the real conflict is reported, and the summary line. It needs no media:
+Integration test for [`scripts/match-subtitles.sh`](#scriptsmatch-subtitlessh), run with the node's bash. It builds seven scenario folders in a fresh temp directory (already matching with empty parentheses, a suffixed video with `()` and plain-named subtitles, a real conflict, an exact match, `.ogm`/`.divx` videos, numbered subtitles next to a title that ends in a number), runs the script and checks every resulting file name, that only the real conflict is reported, and the summary line. It needs no media:
 
 ```bash
 MSYS_NO_PATHCONV=1 docker cp scripts/match-subtitles.sh tdarr-node:/tmp/match-subtitles.sh
