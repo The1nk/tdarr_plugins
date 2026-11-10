@@ -8,7 +8,7 @@ const details = () => ({
   This plugin removes streams based on the specified property.
   Checks FFprobe 'streams' and MediaInfo 'track' properties.
   `,
-  Version: '1.00',
+  Version: '1.01',
   Tags: 'action',
   Inputs: [
     {
@@ -73,17 +73,26 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
 
   response.preset += ', -map 0 -c copy -max_muxing_queue_size 9999';
 
+  // MediaInfo lists General, then the media tracks in file order, then Menu (chapters); it does
+  // not list attachments (fonts, cover art), which ffprobe lists after the tracks. So ffprobe
+  // stream i pairs with media track i, and a stream with no media track is checked by ffprobe alone.
+  const mediaInfoTracks = ((file.mediaInfo && file.mediaInfo.track) || [])
+    .filter((t) => t && t['@type'] !== 'General' && t['@type'] !== 'Menu');
+
   try {
     let streamToRemove = false;
     for (let i = 0; i < file.ffProbeData.streams.length; i += 1) {
       try {
+        const ffValue = file.ffProbeData.streams[i][propertyToCheck];
+        const mediaInfoTrack = mediaInfoTracks[i];
+        const mediaInfoValue = mediaInfoTrack ? mediaInfoTrack[propertyToCheck] : undefined;
         if (
-          valuesToRemove.includes(String(file.ffProbeData.streams[i][propertyToCheck]))
-          || valuesToRemove.includes(String(file.mediaInfo.track[i + 1][propertyToCheck]))
+          valuesToRemove.includes(String(ffValue))
+          || (mediaInfoValue !== undefined && valuesToRemove.includes(String(mediaInfoValue)))
         ) {
           response.preset += ` -map -0:${i} `;
-          response.infoLog += ` Removing stream ${i} which is has ${propertyToCheck}`
-          + ` of ${file.ffProbeData.streams[i][propertyToCheck]} \n`;
+          response.infoLog += ` Removing stream ${i} which has ${propertyToCheck}`
+          + ` of ${valuesToRemove.includes(String(ffValue)) ? ffValue : mediaInfoValue} \n`;
           streamToRemove = true;
         }
       } catch (err) {
@@ -93,9 +102,9 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
 
     if (streamToRemove === true) {
       response.processFile = true;
-      response.infoLog += ' Files has streams which need to be removed, processing \n';
+      response.infoLog += ' File has streams which need to be removed, processing \n';
     } else {
-      response.infoLog += ' Files does not have streams which need to be removed \n';
+      response.infoLog += ' File does not have streams which need to be removed \n';
     }
   } catch (err) {
     response.infoLog += ` Error checking streams:${err}`;
