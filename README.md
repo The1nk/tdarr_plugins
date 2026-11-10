@@ -11,6 +11,7 @@ CLAUDE.md          Guidance for Claude Code
 plugins/           Tdarr plugin files (Tdarr_Plugin_<author>_<description>.js)
 flows/             Tdarr flow exports: flow*.json, plus gitignored flow*.local.json
 tools/             Command-line tools (check-video.js)
+scripts/           Shell scripts the flows run (match-subtitles.sh)
 tests/             Unit tests (*.test.js)
   container/       Integration tests that run inside the tdarr-node container
 docs/superpowers/  Design specs and implementation plans (historical)
@@ -22,6 +23,7 @@ path.env           Path to the Tdarr plugins folder (gitignored)
 - `plugins/`: one standalone `.js` file per plugin; see [Plugins](#plugins). The local copies of the community plugins the flows use (see [Local copies of community plugins](#local-copies-of-community-plugins)) live here too.
 - `flows/`: the five flow exports, described under [Plugin Flow](#plugin-flow). The committed `flow*.json` files have placeholder API keys. The gitignored `flow*.local.json` copies hold the real Radarr/Sonarr API keys and are the ones to import into Tdarr.
 - `tools/`: see [Tools](#tools).
+- `scripts/`: see [Scripts](#scripts).
 - `tests/` and `tests/container/`: the unit tests and the in-container integration tests; see [Tests](#tests).
 - `docs/superpowers/`: the design specs and implementation plans the work was done from. They are historical records, so the file paths in them describe the layout at the time they were written.
 - `push.ps1` / `pull.ps1` and `path.env`: see [Deployment](#deployment).
@@ -33,6 +35,7 @@ path.env           Path to the Tdarr plugins folder (gitignored)
 - [Plugins](#plugins): what each plugin does and its inputs
   - [Local copies of community plugins](#local-copies-of-community-plugins)
 - [Tools](#tools): `check-video.js`
+- [Scripts](#scripts): `match-subtitles.sh`
 - [Deployment](#deployment)
 - [Tests](#tests)
 
@@ -280,6 +283,8 @@ Executes an arbitrary bash script after processing. The directory of the current
 |-------|------|---------|-------------|
 | `script` | string | _(empty)_ | Absolute path to the bash script to execute |
 
+The flows run [`match-subtitles.sh`](#scriptsmatch-subtitlessh) with it.
+
 ---
 
 ### Local copies of community plugins
@@ -345,9 +350,25 @@ If the output is cut short (for example piped into `Select-Object -First N` or `
 
 ---
 
+## Scripts
+
+### `scripts/match-subtitles.sh`
+
+Renames subtitle files (`srt ass ssa vtt sub idx sup`) and per-episode sidecars (`.nfo`, `.jpg`, `.png`, `.tbn`) to match their video after the video gained a suffix such as ` (Tdarr)`. For example, `Ep ().en.srt` becomes `Ep (Tdarr).en.srt` next to `Ep (Tdarr).mkv`. Language and tag parts (`.en.forced`) are kept, folder-level artwork and metadata (`poster.jpg`, `season.nfo`, ...) are ignored, and an existing file is never overwritten (reported as `CONFLICT`). A file that already matches its video, with or without empty parentheses, is left alone. The flows run it through Run Bash Script in Post with the file's folder as its argument; it also runs by hand:
+
+```bash
+match-subtitles.sh [-n|--dry-run] [-p|--prompt] [PATH]
+```
+
+The live copy is `/media/match-subtitles.sh` in the node (`M:\match-subtitles.sh` on this PC); deploy it by copying `scripts/match-subtitles.sh` there (see [Deployment](#deployment)).
+
+---
+
 ## Deployment
 
 `path.env` (gitignored) holds the path to the Tdarr plugins folder. `./push.ps1` copies every `.js` file in `plugins/` to that folder, and `./pull.ps1` copies every `.js` file from that folder into `plugins/`. Both work from any current directory, and stop with an error if `path.env` is missing, empty, or points at a folder that doesn't exist. Pulling also brings back the two plugins that aren't kept in the repo; they are gitignored. See also [`CLAUDE.md`](CLAUDE.md).
+
+`scripts/match-subtitles.sh` is not part of push/pull: copy it to `M:\match-subtitles.sh` (`/media/match-subtitles.sh` in the node) by hand. The repo keeps it with LF line endings (`.gitattributes`), which bash needs.
 
 ---
 
@@ -381,4 +402,13 @@ MSYS_NO_PATHCONV=1 docker cp plugins/Tdarr_Plugin_the1nk_repair_framerate.js tda
 MSYS_NO_PATHCONV=1 docker cp tests/container/detect_damaged_video.itest.js tdarr-node:/tmp/itest/plugins/
 MSYS_NO_PATHCONV=1 docker exec tdarr-node node /tmp/itest/plugins/detect_damaged_video.itest.js ["<damaged file under /media>"]
 MSYS_NO_PATHCONV=1 docker exec tdarr-node rm -rf /tmp/itest
+```
+
+Integration test for [`scripts/match-subtitles.sh`](#scriptsmatch-subtitlessh), run with the node's bash. It builds five scenario folders in a fresh temp directory (already matching with empty parentheses, a suffixed video with `()` and plain-named subtitles, a real conflict, an exact match), runs the script and checks every resulting file name, that only the real conflict is reported, and the summary line. It needs no media:
+
+```bash
+MSYS_NO_PATHCONV=1 docker cp scripts/match-subtitles.sh tdarr-node:/tmp/match-subtitles.sh
+MSYS_NO_PATHCONV=1 docker cp tests/container/match_subtitles.itest.sh tdarr-node:/tmp/match_subtitles.itest.sh
+MSYS_NO_PATHCONV=1 docker exec tdarr-node bash /tmp/match_subtitles.itest.sh /tmp/match-subtitles.sh
+MSYS_NO_PATHCONV=1 docker exec tdarr-node rm -f /tmp/match-subtitles.sh /tmp/match_subtitles.itest.sh
 ```
