@@ -26,6 +26,16 @@ test('migz remux: a .ts labelled audio but holding a video stream is remuxed to 
   assert.ok(res.infoLog.includes('☒File is ts but requested to be mkv container. Remuxing.'), res.infoLog);
 });
 
+// Measured in the Tdarr node (FFmpeg 7.1.4): an .ogm (Great Teacher Onizuka) and a .divx (Doctor Who)
+// both fail "-c copy" to mkv with "Can't write packet with unknown timestamp"; with genpts they remux whole.
+test('migz remux: .ogm and .divx are remuxed to mkv with genpts', () => {
+  ['ogm', 'divx', 'OGM'].forEach((container) => {
+    const res = run({ container, fileMedium: 'video', ffProbeData: { streams: [video({ codec_name: 'mpeg4' }), audio('vorbis')] } });
+    assert.strictEqual(res.processFile, true, container);
+    assert.strictEqual(res.preset, '-fflags +genpts, -map 0 -c copy -max_muxing_queue_size 9999 -map -0:d ', container);
+  });
+});
+
 test('migz remux: audio whose only video stream is cover art is not a video', () => {
   const res = run({ container: 'mp3', fileMedium: 'audio', ffProbeData: { streams: [
     audio('mp3'), video({ codec_name: 'mjpeg', disposition: { attached_pic: 1 } })] } });

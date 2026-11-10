@@ -7,7 +7,7 @@ const details = () => ({
   Operation: 'Transcode',
   Description: 'Files will be remuxed into either mkv or mp4. \n\n'
     + 'Local copy (the1nk): also treats a file as video when ffprobe finds a video stream that isn\'t cover art, because Tdarr labels a file audio when its video frame rate reads 0/0 (seen on some MPEG-TS captures); remuxing re-derives it. \n\n',
-  Version: '1.2.1',
+  Version: '1.2.2',
   Tags: 'pre-processing,ffmpeg,video only,configurable',
   Inputs: [{
     name: 'container',
@@ -149,12 +149,9 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   }
 
   // If Container .ts|.avi|.mpg|.mpeg set genpts to fix unknown timestamp
-  if (
-    file.container.toLowerCase() === 'ts'
-     || file.container.toLowerCase() === 'avi'
-  || file.container.toLowerCase() === 'mpg'
-  || file.container.toLowerCase() === 'mpeg'
-  ) {
+  // the1nk: .ogm and .divx too: measured in the Tdarr node (FFmpeg 7.1.4), both fail "-c copy" to mkv with
+  // "Can't write packet with unknown timestamp" and remux whole with genpts.
+  if (['ts', 'avi', 'mpg', 'mpeg', 'ogm', 'divx'].includes(file.container.toLowerCase())) {
     genpts = '-fflags +genpts';
   }
 

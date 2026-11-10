@@ -294,7 +294,7 @@ These are community plugins kept as local copies (in `plugins/` here, and in Tda
 | Plugin | Used for |
 |--------|----------|
 | `Tdarr_Plugin_00td_action_remove_stream_by_specified_property` | Drops `bmp` streams (`propertyToCheck=codec_name`, `valuesToRemove=bmp`). **Modified (v1.01):** streams MediaInfo doesn't list (attachments such as fonts) are checked by ffprobe alone instead of logging "Error reading stream" |
-| `Tdarr_Plugin_MC93_Migz1Remux` | Remuxes to MKV with `force_conform` (drops data / `mov_text` / `eia_608` / `timed_id3`). **Modified (v1.2.1):** also remuxes files Tdarr labels audio when ffprobe finds a real video stream, even if the container already matches (Tdarr labels a file audio when its video frame rate reads `0/0`, seen on some MPEG-TS captures); the remux re-derives the rate |
+| `Tdarr_Plugin_MC93_Migz1Remux` | Remuxes to MKV with `force_conform` (drops data / `mov_text` / `eia_608` / `timed_id3`). **Modified (v1.2.2):** adds `-fflags +genpts` for `.ogm` and `.divx` too (they fail a plain copy-remux with "unknown timestamp"); also remuxes files Tdarr labels audio when ffprobe finds a real video stream, even if the container already matches (Tdarr labels a file audio when its video frame rate reads `0/0`, seen on some MPEG-TS captures); the remux re-derives the rate |
 | `Tdarr_Plugin_vdka_Remove_DataStreams` | Drops any remaining data streams |
 
 `Tdarr_Plugin_MC93_MigzImageRemoval` and `Tdarr_Plugin_lmg1_Reorder_Streams` are used straight from the `Community` repo.
